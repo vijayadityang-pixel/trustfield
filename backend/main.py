@@ -22,7 +22,7 @@ from api.routes_containment import router as containment_router
 from api.routes_graph import router as graph_router
 from api.routes_scan import router as scan_router
 from api.routes_auth import router as auth_router
-
+from api.routes_ml import router as ml_router
 # ─── Logging Setup ────────────────────────────────────────────────────────────
 
 logging.basicConfig(
@@ -150,7 +150,7 @@ app.include_router(containment_router, prefix=PREFIX)
 app.include_router(graph_router,       prefix=PREFIX)
 app.include_router(scan_router,        prefix=PREFIX)
 app.include_router(auth_router,        prefix=PREFIX)
-
+app.include_router(ml_router,          prefix=PREFIX)
 
 # ─── Health & Info Endpoints ──────────────────────────────────────────────────
 

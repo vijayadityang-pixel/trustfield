@@ -266,6 +266,41 @@ class Neo4jClient:
         "avg_risk": records[0]["avg_risk"],
         "high_risk_count": records[0]["high_risk_count"],
         }
+    
+    async def get_all_nodes_and_edges(self, cloud_provider: Optional[str] = None) -> Dict[str, List[Dict]]:
+        """
+        Return the full graph as raw node/edge dicts using the real stored
+        property names (id, provider, node_type, privilege_level, etc.) —
+        NOT the renamed node_id/cloud_provider naming build_graph() uses for
+        its API response schema. FeatureExtractor expects these raw names.
+        """
+        node_query = """
+        MATCH (n:Identity)
+        WHERE ($provider IS NULL OR n.provider = $provider)
+        RETURN n
+        """
+        node_records = await self.run_query(node_query, {"provider": cloud_provider})
+        nodes = [dict(r["n"]) for r in node_records]
+
+        # No :Identity restriction on edges — this intentionally includes
+        # edges to/from skeleton nodes (e.g. wildcard "*" principals, external
+        # account roots) created by upsert_edge's MERGE, since those edges
+        # still matter for degree/centrality even though the endpoint itself
+        # was never ingested as a full Identity node.
+        edge_query = """
+        MATCH (source)-[r]->(target)
+        WHERE ($provider IS NULL OR source.provider = $provider)
+        RETURN source.id AS source, target.id AS target,
+               type(r) AS relationship, properties(r) AS properties
+        """
+        edge_records = await self.run_query(edge_query, {"provider": cloud_provider})
+        edges = []
+        for r in edge_records:
+            edge = {"source": r["source"], "target": r["target"], "relationship": r["relationship"]}
+            edge.update(r.get("properties") or {})
+            edges.append(edge)
+
+        return {"nodes": nodes, "edges": edges}
 
     async def apply_indexes(self) -> None:
         """Create Neo4j indexes and constraints for performance."""

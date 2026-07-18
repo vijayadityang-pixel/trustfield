@@ -119,11 +119,18 @@ class IsolationForestDetector:
 
     def _raw_score_to_anomaly_score(self, raw_scores: np.ndarray) -> np.ndarray:
         """
-        Convert IsolationForest raw scores (negative float) to [0, 1] anomaly scores.
+        Convert IsolationForest raw scores to [0, 1] anomaly scores, normalized
+        against this batch's actual score range rather than a fixed assumed
+        range (sklearn does not guarantee scores fall in [-0.5, 0.5] — that
+        assumption was silently compressing nearly every node's score toward 1.0
+        and flagging the entire dataset as anomalous).
         Lower raw score = more anomalous → higher output score.
         """
-        # Raw scores are in range [-0.5, 0.5] roughly; negate and normalize
-        normalized = (-raw_scores - (-0.5)) / (0.5 - (-0.5))
+        min_score = raw_scores.min()
+        max_score = raw_scores.max()
+        if max_score == min_score:
+            return np.zeros_like(raw_scores)
+        normalized = (max_score - raw_scores) / (max_score - min_score)
         return np.clip(normalized, 0.0, 1.0)
 
     def train(self, nodes: List[Dict]) -> Dict:
@@ -192,7 +199,7 @@ class IsolationForestDetector:
 
         results = []
         for i, node_id in enumerate(node_ids):
-            is_anomaly = (
+            is_anomaly = bool(
                 predictions[i] == -1
                 or anomaly_scores[i] >= self.anomaly_threshold
             )
