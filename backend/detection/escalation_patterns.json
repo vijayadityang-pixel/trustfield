@@ -1,0 +1,185 @@
+{
+  "version": "1.0.0",
+  "description": "TrustField privilege escalation and IAM misconfiguration detection patterns",
+  "patterns": [
+    {
+      "id": "ADMIN_ACCESS_NO_MFA",
+      "name": "Admin Access Without MFA",
+      "severity": "critical",
+      "description": "IAM user with administrative permissions has MFA disabled",
+      "logic": "AND",
+      "conditions": [
+        { "field": "has_admin_policy", "operator": "eq", "value": true },
+        { "field": "mfa_enabled",      "operator": "eq", "value": false }
+      ],
+      "mitre_technique": "T1078.004 - Cloud Accounts",
+      "remediation": "Enable MFA for all users with administrative privileges immediately"
+    },
+    {
+      "id": "WILDCARD_ACTION_RESOURCE",
+      "name": "Wildcard Action on All Resources",
+      "severity": "critical",
+      "description": "IAM policy grants Action:* on Resource:* — effectively root access",
+      "logic": "AND",
+      "conditions": [
+        { "field": "policy_actions",   "operator": "contains", "value": "*" },
+        { "field": "policy_resources", "operator": "contains", "value": "*" }
+      ],
+      "mitre_technique": "T1548 - Abuse Elevation Control Mechanism",
+      "remediation": "Replace Action:*/Resource:* with specific least-privilege permissions"
+    },
+    {
+      "id": "STALE_ACCESS_KEY_90D",
+      "name": "Access Key Older Than 90 Days",
+      "severity": "medium",
+      "description": "Active IAM access key has not been rotated in over 90 days",
+      "logic": "AND",
+      "conditions": [
+        { "field": "access_key_age_days", "operator": "gte", "value": 90 },
+        { "field": "access_key_active",   "operator": "eq",  "value": true }
+      ],
+      "mitre_technique": "T1078 - Valid Accounts",
+      "remediation": "Rotate access keys immediately; enforce 90-day rotation policy"
+    },
+    {
+      "id": "STALE_ACCESS_KEY_180D",
+      "name": "Access Key Older Than 180 Days",
+      "severity": "high",
+      "description": "Active IAM access key has not been rotated in over 180 days",
+      "logic": "AND",
+      "conditions": [
+        { "field": "access_key_age_days", "operator": "gte", "value": 180 },
+        { "field": "access_key_active",   "operator": "eq",  "value": true }
+      ],
+      "mitre_technique": "T1078 - Valid Accounts",
+      "remediation": "Rotate access keys immediately; consider using IAM roles instead"
+    },
+    {
+      "id": "CROSS_ACCOUNT_NO_EXTERNAL_ID",
+      "name": "Cross-Account Role Without ExternalId",
+      "severity": "high",
+      "description": "Cross-account role trust policy lacks ExternalId condition (confused deputy risk)",
+      "logic": "AND",
+      "conditions": [
+        { "field": "is_cross_account",        "operator": "eq",          "value": true },
+        { "field": "has_external_id_condition","operator": "eq",          "value": false }
+      ],
+      "mitre_technique": "T1199 - Trusted Relationship",
+      "remediation": "Add sts:ExternalId condition to all cross-account trust policies"
+    },
+    {
+      "id": "WILDCARD_TRUST_PRINCIPAL",
+      "name": "Wildcard Principal in Trust Policy",
+      "severity": "critical",
+      "description": "Role trust policy allows Principal:* — any entity may assume this role",
+      "logic": "AND",
+      "conditions": [
+        { "field": "trust_principal", "operator": "eq", "value": "*" }
+      ],
+      "mitre_technique": "T1078.004 - Cloud Accounts",
+      "remediation": "Replace wildcard principal with specific account/role ARNs; add conditions"
+    },
+    {
+      "id": "K8S_SA_CLUSTER_ADMIN",
+      "name": "K8s Service Account Bound to cluster-admin",
+      "severity": "critical",
+      "description": "Kubernetes service account has cluster-admin ClusterRoleBinding",
+      "logic": "AND",
+      "conditions": [
+        { "field": "role_name",    "operator": "eq", "value": "cluster-admin" },
+        { "field": "subject_kind", "operator": "eq", "value": "ServiceAccount" }
+      ],
+      "mitre_technique": "T1548.005 - Kubernetes RBAC",
+      "remediation": "Replace cluster-admin with namespace-scoped roles with specific verbs"
+    },
+    {
+      "id": "K8S_DEFAULT_SA_BOUND",
+      "name": "Default Service Account Has Non-Default Bindings",
+      "severity": "medium",
+      "description": "The default service account in a namespace has RBAC role bindings",
+      "logic": "AND",
+      "conditions": [
+        { "field": "service_account_name", "operator": "eq",      "value": "default" },
+        { "field": "binding_count",         "operator": "gt",      "value": 0         }
+      ],
+      "mitre_technique": "T1548.005",
+      "remediation": "Avoid using the default service account; create dedicated service accounts per workload"
+    },
+    {
+      "id": "GCP_SA_KEY_EXISTS",
+      "name": "GCP Service Account Has User-Managed Keys",
+      "severity": "medium",
+      "description": "GCP service account has one or more user-managed keys (vs. Google-managed)",
+      "logic": "AND",
+      "conditions": [
+        { "field": "user_managed_key_count", "operator": "gt", "value": 0 }
+      ],
+      "mitre_technique": "T1552.001 - Credentials in Files",
+      "remediation": "Use Workload Identity or service account impersonation instead of key files"
+    },
+    {
+      "id": "GCP_PRIMITIVE_ROLE",
+      "name": "GCP Primitive Role Assigned",
+      "severity": "high",
+      "description": "Primitive role (Owner/Editor/Viewer) assigned at project level",
+      "logic": "AND",
+      "conditions": [
+        { "field": "role", "operator": "in", "value": ["roles/owner","roles/editor","roles/viewer"] },
+        { "field": "scope","operator": "eq", "value": "project" }
+      ],
+      "mitre_technique": "T1078.004",
+      "remediation": "Replace primitive roles with predefined or custom least-privilege roles"
+    },
+    {
+      "id": "AZURE_OWNER_NO_CONDITIONS",
+      "name": "Azure Owner Without Conditions",
+      "severity": "critical",
+      "description": "Principal assigned Owner role at subscription scope without ABAC conditions",
+      "logic": "AND",
+      "conditions": [
+        { "field": "role_name",            "operator": "contains", "value": "Owner" },
+        { "field": "scope_level",          "operator": "eq",       "value": "subscription" },
+        { "field": "has_abac_conditions",  "operator": "eq",       "value": false }
+      ],
+      "mitre_technique": "T1078.004",
+      "remediation": "Apply ABAC conditions; scope Owner assignments to resource groups"
+    },
+    {
+      "id": "UNUSED_IAM_USER_90D",
+      "name": "IAM User Inactive For 90 Days",
+      "severity": "medium",
+      "description": "IAM user has not logged in or used access keys in 90+ days",
+      "logic": "AND",
+      "conditions": [
+        { "field": "days_since_last_used", "operator": "gte", "value": 90 },
+        { "field": "is_active",            "operator": "eq",  "value": true }
+      ],
+      "mitre_technique": "T1078 - Valid Accounts",
+      "remediation": "Disable or delete unused IAM users; automate deprovisioning"
+    },
+    {
+      "id": "INLINE_POLICY_ADMIN",
+      "name": "Inline Policy Grants Admin Permissions",
+      "severity": "high",
+      "description": "Entity has an inline policy (not managed) granting admin-level actions",
+      "logic": "AND",
+      "conditions": [
+        { "field": "has_inline_admin_policy", "operator": "eq", "value": true }
+      ],
+      "mitre_technique": "T1548",
+      "remediation": "Replace inline policies with customer-managed policies; apply permission boundaries"
+    },
+    {
+      "id": "MULTIPLE_ADMIN_ROLES",
+      "name": "Identity Has Multiple Admin-Level Roles",
+      "severity": "high",
+      "description": "Principal is assigned more than one administrative role",
+      "logic": "AND",
+      "conditions": [
+        { "field": "admin_role_count", "operator": "gt", "value": 1 }
+      ],
+      "mitre_technique": "T1078",
+      "remediation": "Consolidate admin assignments; apply SoD (Separation of Duties)"
+    }
+  ]
+}

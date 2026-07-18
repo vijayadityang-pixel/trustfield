@@ -1,0 +1,25 @@
+# Existing
+node_modules
+dist
+.env
+.env.local
+*.log
+backend/gcp-collector-key.json
+
+# Add these — Python
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Add these — other secrets/creds you've used this project
+backend/*.pem
+backend/*credentials*.json
+*.key
+
+# Editor/OS noise
+.vscode/
+.DS_Store
+
+# Vite build artifacts
+.vite/

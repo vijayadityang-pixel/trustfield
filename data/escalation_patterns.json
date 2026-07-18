@@ -1,0 +1,169 @@
+{
+  "patterns": [
+    {
+      "id": "EP-001",
+      "name": "Confused Deputy via Cross-Account AssumeRole",
+      "category": "privilege_escalation",
+      "severity": "critical",
+      "mitre_attack": {
+        "technique_id": "T1548.005",
+        "technique_name": "Abuse Elevation Control Mechanism: Temporary Elevated Cloud Access"
+      },
+      "description": "A trust policy permits a third-party AWS account to assume a role without requiring sts:ExternalId, allowing any caller who learns the role ARN to assume it on behalf of the trusted service.",
+      "conditions": [
+        "trust_policy.Principal.AWS is an external account ID",
+        "trust_policy.Condition does NOT contain sts:ExternalId",
+        "role.attached_policies includes at least one policy with Action: '*' or iam:*"
+      ],
+      "indicators": [
+        "Missing or wildcarded sts:ExternalId condition",
+        "Role ARN referenced in public documentation or marketing material",
+        "AssumeRole calls originating from IP ranges outside the trusted vendor's published CIDR list"
+      ],
+      "recommended_containment": "quarantine_role"
+    },
+    {
+      "id": "EP-002",
+      "name": "iam:PassRole + lambda:CreateFunction Escalation",
+      "category": "privilege_escalation",
+      "severity": "high",
+      "mitre_attack": {
+        "technique_id": "T1098.003",
+        "technique_name": "Account Manipulation: Additional Cloud Roles"
+      },
+      "description": "A principal holding iam:PassRole on a highly-privileged role combined with lambda:CreateFunction and lambda:InvokeFunction can create a function that assumes the privileged role, executing arbitrary code under elevated permissions.",
+      "conditions": [
+        "identity_policy.Action includes iam:PassRole",
+        "identity_policy.Action includes lambda:CreateFunction",
+        "passable_role.attached_policies includes AdministratorAccess OR equivalent wildcard policy"
+      ],
+      "indicators": [
+        "PassRole resource scoped with wildcard (Resource: '*')",
+        "No service-linked role restriction on lambda:CreateFunction",
+        "CloudTrail shows CreateFunction immediately followed by Invoke from a low-privilege identity"
+      ],
+      "recommended_containment": "revoke_session_and_disable_key"
+    },
+    {
+      "id": "EP-003",
+      "name": "Wildcard Resource in Trust Policy",
+      "category": "misconfiguration",
+      "severity": "high",
+      "mitre_attack": {
+        "technique_id": "T1078.004",
+        "technique_name": "Valid Accounts: Cloud Accounts"
+      },
+      "description": "A role's trust policy uses a wildcard principal (Principal: '*') or an overly broad federated principal, allowing unintended identities to assume the role.",
+      "conditions": [
+        "trust_policy.Principal == '*' OR trust_policy.Principal.Federated matches broad OIDC wildcard",
+        "no aws:PrincipalOrgID condition present"
+      ],
+      "indicators": [
+        "AssumeRole attempts from previously unseen account IDs",
+        "Role has not been scoped with aws:PrincipalOrgID or aws:SourceAccount"
+      ],
+      "recommended_containment": "tighten_trust_policy"
+    },
+    {
+      "id": "EP-004",
+      "name": "Excessive AssumeRole Chain Depth",
+      "category": "lateral_movement",
+      "severity": "medium",
+      "mitre_attack": {
+        "technique_id": "T1550.001",
+        "technique_name": "Use Alternate Authentication Material: Application Access Token"
+      },
+      "description": "A chain of role assumptions exceeds the organization's configured depth threshold (default 3), often used to obscure the original caller identity from audit trails.",
+      "conditions": [
+        "trust_graph.path_length(source, target) > config.max_chain_depth",
+        "each hop in the chain is a distinct role"
+      ],
+      "indicators": [
+        "CloudTrail sessionContext.sessionIssuer chains spanning 4+ roles",
+        "Final role in chain has materially higher privilege than the originating identity"
+      ],
+      "recommended_containment": "alert_only"
+    },
+    {
+      "id": "EP-005",
+      "name": "GCP Service Account Impersonation Chain",
+      "category": "privilege_escalation",
+      "severity": "high",
+      "mitre_attack": {
+        "technique_id": "T1078.004",
+        "technique_name": "Valid Accounts: Cloud Accounts"
+      },
+      "description": "An identity holds roles/iam.serviceAccountTokenCreator on a service account that, in turn, holds elevated project-level roles, enabling impersonation-based privilege escalation.",
+      "conditions": [
+        "iam_policy.bindings includes roles/iam.serviceAccountTokenCreator",
+        "target_service_account.project_roles includes roles/owner OR roles/editor"
+      ],
+      "indicators": [
+        "generateAccessToken calls in Cloud Audit Logs from non-service identities",
+        "Impersonation chain length greater than 1"
+      ],
+      "recommended_containment": "revoke_impersonation_binding"
+    },
+    {
+      "id": "EP-006",
+      "name": "Azure Managed Identity Federation Abuse",
+      "category": "privilege_escalation",
+      "severity": "high",
+      "mitre_attack": {
+        "technique_id": "T1098.001",
+        "technique_name": "Account Manipulation: Additional Cloud Credentials"
+      },
+      "description": "A user-assigned managed identity is federated to an external workload identity (e.g. GitHub Actions OIDC) with an overly permissive subject claim, allowing any workflow in the repository to assume the identity's Azure RBAC roles.",
+      "conditions": [
+        "federated_credential.subject matches broad wildcard pattern (e.g. repo:org/*)",
+        "managed_identity.role_assignments includes Owner OR Contributor at subscription scope"
+      ],
+      "indicators": [
+        "Federated credential subject lacks branch or environment qualifier",
+        "Sign-ins from GitHub Actions IP ranges assuming subscription-level roles"
+      ],
+      "recommended_containment": "scope_down_federation"
+    },
+    {
+      "id": "EP-007",
+      "name": "Kubernetes ServiceAccount Token Mounted with cluster-admin Binding",
+      "category": "privilege_escalation",
+      "severity": "critical",
+      "mitre_attack": {
+        "technique_id": "T1610",
+        "technique_name": "Deploy Container"
+      },
+      "description": "A pod's ServiceAccount is bound to the cluster-admin ClusterRole via a ClusterRoleBinding while automountServiceAccountToken is enabled, granting any process inside the pod full cluster control if compromised.",
+      "conditions": [
+        "clusterrolebinding.roleRef.name == 'cluster-admin'",
+        "pod.spec.automountServiceAccountToken != false",
+        "serviceaccount is not in a system namespace (kube-system, kube-public)"
+      ],
+      "indicators": [
+        "Workload namespace mismatched with cluster-admin scope",
+        "kubectl exec or token exfiltration events from the affected pod"
+      ],
+      "recommended_containment": "patch_rbac_binding"
+    },
+    {
+      "id": "EP-008",
+      "name": "Stale Cross-Account Trust to Decommissioned Account",
+      "category": "misconfiguration",
+      "severity": "medium",
+      "mitre_attack": {
+        "technique_id": "T1078.004",
+        "technique_name": "Valid Accounts: Cloud Accounts"
+      },
+      "description": "A trust policy still references an external account ID that has been decommissioned or reassigned, creating a window for account-takeover-based privilege escalation if the account ID is reused.",
+      "conditions": [
+        "trust_policy.Principal.AWS not in current_known_accounts_registry",
+        "last_assume_role_event > 180 days ago"
+      ],
+      "indicators": [
+        "No recent AssumeRole activity from the referenced account",
+        "Account ID absent from the organization's active account inventory"
+      ],
+      "recommended_containment": "remove_stale_trust"
+    }
+  ]
+}

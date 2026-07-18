@@ -1,0 +1,193 @@
+{
+  "events": [
+    {
+      "eventVersion": "1.08",
+      "eventTime": "2026-06-10T03:12:44Z",
+      "eventName": "AssumeRole",
+      "eventSource": "sts.amazonaws.com",
+      "awsRegion": "us-east-1",
+      "sourceIPAddress": "203.0.113.45",
+      "userIdentity": {
+        "type": "AssumedRole",
+        "principalId": "AROAEXTERNAL123",
+        "arn": "arn:aws:sts::999988887777:assumed-role/external-vendor-role/session-1"
+      },
+      "requestParameters": {
+        "roleArn": "arn:aws:iam::111122223333:role/vendor-billing-integration",
+        "roleSessionName": "vendor-session-9f2a"
+      },
+      "responseElements": { "credentials": { "sessionName": "vendor-session-9f2a" } },
+      "label": "anomalous",
+      "notes": "Matches EP-001: missing ExternalId, source IP outside known vendor CIDR"
+    },
+    {
+      "eventVersion": "1.08",
+      "eventTime": "2026-06-10T03:13:02Z",
+      "eventName": "PutRolePolicy",
+      "eventSource": "iam.amazonaws.com",
+      "awsRegion": "us-east-1",
+      "sourceIPAddress": "203.0.113.45",
+      "userIdentity": {
+        "type": "AssumedRole",
+        "arn": "arn:aws:sts::111122223333:assumed-role/vendor-billing-integration/vendor-session-9f2a"
+      },
+      "requestParameters": {
+        "roleName": "vendor-billing-integration",
+        "policyName": "inline-backdoor",
+        "policyDocument": "{\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\"}]}"
+      },
+      "label": "anomalous",
+      "notes": "Privilege escalation immediately following suspicious AssumeRole"
+    },
+    {
+      "eventVersion": "1.08",
+      "eventTime": "2026-06-10T09:41:17Z",
+      "eventName": "CreateFunction",
+      "eventSource": "lambda.amazonaws.com",
+      "awsRegion": "us-west-2",
+      "sourceIPAddress": "10.0.4.12",
+      "userIdentity": {
+        "type": "IAMUser",
+        "arn": "arn:aws:iam::111122223333:user/svc-legacy-etl"
+      },
+      "requestParameters": {
+        "functionName": "etl-helper-tmp",
+        "role": "arn:aws:iam::111122223333:role/data-analyst-readonly"
+      },
+      "label": "anomalous",
+      "notes": "Matches EP-002 pattern: PassRole + CreateFunction from low-privilege identity"
+    },
+    {
+      "eventVersion": "1.08",
+      "eventTime": "2026-06-10T09:41:25Z",
+      "eventName": "InvokeFunction",
+      "eventSource": "lambda.amazonaws.com",
+      "awsRegion": "us-west-2",
+      "sourceIPAddress": "10.0.4.12",
+      "userIdentity": {
+        "type": "IAMUser",
+        "arn": "arn:aws:iam::111122223333:user/svc-legacy-etl"
+      },
+      "requestParameters": { "functionName": "etl-helper-tmp" },
+      "label": "anomalous",
+      "notes": "Function invoked under privileged role moments after creation"
+    },
+    {
+      "eventVersion": "1.08",
+      "eventTime": "2026-06-10T14:02:09Z",
+      "eventName": "AssumeRole",
+      "eventSource": "sts.amazonaws.com",
+      "awsRegion": "us-east-1",
+      "sourceIPAddress": "10.0.1.88",
+      "userIdentity": {
+        "type": "IAMUser",
+        "arn": "arn:aws:iam::111122223333:user/analyst.jane"
+      },
+      "requestParameters": {
+        "roleArn": "arn:aws:iam::111122223333:role/data-analyst-readonly",
+        "roleSessionName": "jane-daily-report"
+      },
+      "label": "benign",
+      "notes": "Routine analyst session with correct ExternalId condition satisfied"
+    },
+    {
+      "eventVersion": "1.08",
+      "eventTime": "2026-06-11T01:55:33Z",
+      "eventName": "CreateAccessKey",
+      "eventSource": "iam.amazonaws.com",
+      "awsRegion": "us-east-1",
+      "sourceIPAddress": "198.51.100.7",
+      "userIdentity": {
+        "type": "IAMUser",
+        "arn": "arn:aws:iam::111122223333:user/svc-legacy-etl"
+      },
+      "requestParameters": { "userName": "svc-legacy-etl" },
+      "label": "anomalous",
+      "notes": "Off-hours access key creation by service account with self-escalation permissions"
+    },
+    {
+      "eventVersion": "1.08",
+      "eventTime": "2026-06-11T02:01:10Z",
+      "eventName": "AttachUserPolicy",
+      "eventSource": "iam.amazonaws.com",
+      "awsRegion": "us-east-1",
+      "sourceIPAddress": "198.51.100.7",
+      "userIdentity": {
+        "type": "IAMUser",
+        "arn": "arn:aws:iam::111122223333:user/svc-legacy-etl"
+      },
+      "requestParameters": { "userName": "svc-legacy-etl", "policyArn": "arn:aws:iam::aws:policy/AdministratorAccess" },
+      "label": "anomalous",
+      "notes": "Self-attachment of AdministratorAccess; confirms EP pattern escalation"
+    },
+    {
+      "eventVersion": "1.08",
+      "eventTime": "2026-06-11T16:20:05Z",
+      "eventName": "google.iam.admin.v1.GenerateAccessToken",
+      "eventSource": "iamcredentials.googleapis.com",
+      "awsRegion": null,
+      "sourceIPAddress": "192.0.2.18",
+      "userIdentity": {
+        "type": "ExternalUser",
+        "arn": "user:dev.contractor@external-vendor.com"
+      },
+      "requestParameters": {
+        "serviceAccount": "tf-ci-deployer@trustfield-prod.iam.gserviceaccount.com",
+        "lifetime": "3600s"
+      },
+      "label": "anomalous",
+      "notes": "Matches EP-005: external user impersonating roles/owner service account"
+    },
+    {
+      "eventVersion": "1.08",
+      "eventTime": "2026-06-12T08:14:51Z",
+      "eventName": "AssumeRoleWithWebIdentity",
+      "eventSource": "sts.amazonaws.com",
+      "awsRegion": "us-east-1",
+      "sourceIPAddress": "20.205.243.166",
+      "userIdentity": {
+        "type": "WebIdentityUser",
+        "arn": "repo:trustfield-team/internal-tools-repo"
+      },
+      "requestParameters": {
+        "roleArn": "arn:aws:iam::111122223333:role/ci-deploy-role",
+        "roleSessionName": "gh-actions-run-44291"
+      },
+      "label": "benign",
+      "notes": "Expected workflow run from an authorized repository under the broad OIDC subject"
+    },
+    {
+      "eventVersion": "1.08",
+      "eventTime": "2026-06-13T22:47:38Z",
+      "eventName": "kubectl.exec",
+      "eventSource": "kube-apiserver",
+      "awsRegion": null,
+      "sourceIPAddress": "10.244.2.17",
+      "userIdentity": {
+        "type": "ServiceAccount",
+        "arn": "system:serviceaccount:checkout:checkout-api-sa"
+      },
+      "requestParameters": { "pod": "checkout-api-7d9f4-xk2lp", "command": "/bin/sh" },
+      "label": "anomalous",
+      "notes": "Matches EP-007: shell exec from pod bound to cluster-admin via ClusterRoleBinding"
+    },
+    {
+      "eventVersion": "1.08",
+      "eventTime": "2026-06-14T11:03:12Z",
+      "eventName": "AssumeRole",
+      "eventSource": "sts.amazonaws.com",
+      "awsRegion": "eu-west-1",
+      "sourceIPAddress": "10.0.2.41",
+      "userIdentity": {
+        "type": "AssumedRole",
+        "arn": "arn:aws:sts::111122223333:assumed-role/data-analyst-readonly/jane-daily-report"
+      },
+      "requestParameters": {
+        "roleArn": "arn:aws:iam::111122223333:role/ci-deploy-role",
+        "roleSessionName": "chained-session"
+      },
+      "label": "anomalous",
+      "notes": "Matches EP-004: secondary hop in an AssumeRole chain exceeding configured depth"
+    }
+  ]
+}
