@@ -105,6 +105,29 @@ RETURN
 LIMIT $limit
 """
 
+# Find identities with bind/escalate rights on a high-privilege
+# Role/ClusterRole - these are K8s RBAC's built-in escalation primitives
+# (bind/escalate verbs exist specifically to be gated). The target here is
+# a Role/ClusterRole (a permission bundle), not an Identity, so this can't
+# reuse QUERY_PRIVILEGE_ESCALATION's :Identity->:Identity pattern - same
+# structural reason HAS_ROLE doesn't work as a standalone chain-ender for
+# Azure/GCP. impersonate rights are handled separately via synthetic
+# CAN_ASSUME edges emitted at ingest time, which DO ride the generic query.
+QUERY_K8S_ESCALATION_PRIMITIVE = """
+MATCH (source:Identity)-[r:CAN_ESCALATE_VIA]->(target:Role)
+WHERE target.privilege_level >= 3
+  AND ($cloud_provider IS NULL OR source.provider = $cloud_provider)
+RETURN
+    source.id AS source_id,
+    source.name AS source_name,
+    target.id AS target_id,
+    target.name AS target_name,
+    target.privilege_level AS privilege_level,
+    source.provider AS provider,
+    r.verb AS verb
+LIMIT $limit
+"""
+
 ESCALATION_TYPE_DESCRIPTIONS = {
     "privilege_escalation": (
         "Identity can reach higher-privilege permissions through trust chain",
@@ -125,6 +148,13 @@ ESCALATION_TYPE_DESCRIPTIONS = {
         "Cross-account trust relationship with high-privilege role",
         "T1199 - Trusted Relationship",
         "Audit cross-account roles; require ExternalId conditions",
+    ),
+    "k8s_escalation_primitive": (
+        "Identity holds bind/escalate rights on a high-privilege Role/ClusterRole, "
+        "allowing self-escalation by creating a new binding or editing the role",
+        "T1548.005 - Abuse Elevation Control Mechanism",
+        "Restrict bind/escalate verbs to trusted cluster admins; avoid granting "
+        "broad access to roles/clusterroles resources",
     ),
 }
 
@@ -231,6 +261,24 @@ class PrivilegeEscalationPathFinder:
         )
         return [self._record_to_path(r, "cross_account") for r in records]
 
+    async def find_k8s_escalation_primitives(
+        self,
+        cloud_provider: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[EscalationPath]:
+        """
+        Find identities with bind/escalate rights on a high-privilege
+        Role/ClusterRole. NOTE: this only covers bind/escalate - the
+        impersonate primitive is covered separately by
+        find_privilege_escalation_paths() via synthetic CAN_ASSUME edges
+        emitted at ingest time, since impersonate targets a real Identity.
+        """
+        records = await self.neo4j.run_query(
+            QUERY_K8S_ESCALATION_PRIMITIVE,
+            parameters={"cloud_provider": cloud_provider, "limit": limit},
+        )
+        return [self._record_to_path(r, "k8s_escalation_primitive") for r in records]
+
     async def find_escalation_paths(
         self,
         cloud_provider: Optional[str] = None,
@@ -247,6 +295,7 @@ class PrivilegeEscalationPathFinder:
             self.find_role_chaining(cloud_provider, limit=limit),
             self.find_wildcard_trust(cloud_provider, limit=limit),
             self.find_cross_account_risks(cloud_provider, limit=limit),
+            self.find_k8s_escalation_primitives(cloud_provider, limit=limit),
         ]
 
         import asyncio

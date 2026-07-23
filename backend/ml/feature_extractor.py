@@ -50,6 +50,10 @@ FEATURE_NAMES = [
     "type_gcp_custom_role",
     "type_gcp_builtin_role",
     "type_k8s_service_account",
+    "type_k8s_role",
+    "type_k8s_cluster_role",
+    "type_k8s_user",
+    "type_k8s_group",
 ]
 
 PROVIDER_MAP = {"aws": 8, "azure": 9, "gcp": 10, "k8s": 11}
@@ -63,6 +67,10 @@ NODE_TYPE_MAP = {
     "gcp_custom_role": 18,
     "gcp_builtin_role": 19,
     "k8s_service_account": 20,
+    "k8s_role": 21,
+    "k8s_cluster_role": 22,
+    "k8s_user": 23,
+    "k8s_group": 24,
 }
 
 

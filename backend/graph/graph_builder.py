@@ -303,35 +303,315 @@ class TrustGraphBuilder:
 
     # ─── Kubernetes ───────────────────────────────────────────────────────────
 
+    # Roles/names considered high-risk even without wildcard rules visible
+    # (mirrors K8sCollector.HIGH_RISK_ROLE_NAMES - kept in sync manually).
+    _K8S_HIGH_RISK_ROLE_NAMES = {"cluster-admin", "admin", "edit"}
+
+    @classmethod
+    def _k8s_role_privilege(cls, role: Dict, is_cluster_role: bool) -> int:
+        """
+        Heuristic privilege score for a Role/ClusterRole, used to seed
+        risk scoring and to propagate privilege onto bound identities.
+        Same tier scheme as AWS/Azure/GCP role privilege (1-5).
+        """
+        name = role.get("name", "")
+        rules = role.get("rules") or []
+        is_wildcard = any(
+            "*" in (r.get("resources") or []) or "*" in (r.get("verbs") or [])
+            for r in rules
+        )
+        if name in cls._K8S_HIGH_RISK_ROLE_NAMES or is_wildcard:
+            return 5
+        # ClusterRoles have cluster-wide blast radius even without wildcard
+        # rules, so they start a tier above an equivalent namespaced Role.
+        return 3 if is_cluster_role else 2
+
+    # K8s RBAC's built-in escalation primitives - verbs that exist
+    # specifically because they bypass the normal "can't grant what you
+    # don't have" check, so holding them is itself the finding.
+    _K8S_IMPERSONATE_RESOURCES = {"users", "groups", "serviceaccounts"}
+    _K8S_BIND_RESOURCES = {"roles", "clusterroles"}
+    _K8S_ESCALATE_RESOURCES = {"roles", "clusterroles"}
+
+    @staticmethod
+    def _k8s_matching_rules(rules: List[Dict], verb: str, resource_set: set) -> List[Dict]:
+        """Rules granting `verb` (or '*') on any resource in `resource_set` (or '*')."""
+        matches = []
+        for rule in rules or []:
+            verbs = set(rule.get("verbs") or [])
+            resources = set(rule.get("resources") or [])
+            if verb not in verbs and "*" not in verbs:
+                continue
+            if not (resource_set & resources) and "*" not in resources:
+                continue
+            matches.append(rule)
+        return matches
+
+    async def _compute_k8s_escalation_primitives(self, data: Any) -> int:
+        """
+        Detect impersonate/bind/escalate verb grants and emit synthetic
+        edges so they're visible to detectors, instead of silently sitting
+        unused in each role's `rules` list.
+
+          - impersonate -> synthetic CAN_ASSUME straight to the
+            impersonated Identity. Reuses find_privilege_escalation_paths()
+            for free since CAN_ASSUME is already in its pattern.
+          - bind / escalate -> synthetic CAN_ESCALATE_VIA to the
+            Role/ClusterRole itself, since the target isn't an existing
+            Identity. Needs its own detector (find_k8s_escalation_primitives).
+
+        Heuristic simplifications - flag in the Week 8 limitations writeup:
+          - A ClusterRole granting impersonate/bind on a *namespaced*
+            resource can't be resolved to one namespace, so we check the
+            resourceName against every known namespace and connect to
+            whichever targets actually exist. May under- or over-connect
+            versus real cluster behavior.
+          - "Unrestricted" grants (no resourceNames) are capped to targets
+            that are already privilege_level >= 4, to avoid an edge-count
+            blowup rather than connecting to every identity/role in the
+            cluster. This likely under-reports the true blast radius of an
+            unrestricted grant - worth revisiting if false negatives show
+            up in testing.
+        """
+        edges_created = 0
+
+        role_by_id = {r["node_id"]: r for r in data.roles}
+        cluster_role_by_id = {r["node_id"]: r for r in data.cluster_roles}
+        sa_ids = {sa["node_id"] for sa in data.service_accounts}
+
+        high_priv = await self.neo4j.run_query(
+            """
+            MATCH (i:Identity)
+            WHERE i.provider = 'k8s' AND i.privilege_level >= 4
+            RETURN i.id AS id, i.node_type AS node_type
+            """,
+            parameters={},
+        )
+        high_priv_by_kind: Dict[str, List[str]] = {}
+        for rec in high_priv:
+            high_priv_by_kind.setdefault(rec["node_type"], []).append(rec["id"])
+
+        for trust in data.trust_relationships:
+            if trust.get("source_kind") not in ("ServiceAccount", "User", "Group"):
+                continue
+            identity_id = trust["source"]
+            role_id = trust["target"]
+            is_cluster_role = trust.get("target_kind") == "ClusterRole"
+            role = (cluster_role_by_id if is_cluster_role else role_by_id).get(role_id)
+            if not role:
+                continue
+            rules = role.get("rules") or []
+
+            # ── impersonate ──
+            for rule in self._k8s_matching_rules(rules, "impersonate", self._K8S_IMPERSONATE_RESOURCES):
+                resource_names = rule.get("resource_names") or []
+                rule_resources = set(rule.get("resources") or [])
+                kinds = self._K8S_IMPERSONATE_RESOURCES if "*" in rule_resources else (
+                    rule_resources & self._K8S_IMPERSONATE_RESOURCES
+                )
+                for kind in kinds:
+                    node_type = {
+                        "serviceaccounts": "k8s_service_account",
+                        "users": "k8s_user",
+                        "groups": "k8s_group",
+                    }[kind]
+                    if resource_names:
+                        for name in resource_names:
+                            target_ids = []
+                            if kind == "serviceaccounts":
+                                if is_cluster_role:
+                                    target_ids = [
+                                        f"{ns}:{name}" for ns in data.namespaces
+                                        if f"{ns}:{name}" in sa_ids
+                                    ]
+                                else:
+                                    cand = f"{role['namespace']}:{name}"
+                                    target_ids = [cand] if cand in sa_ids else []
+                            elif kind == "users":
+                                target_ids = [f"user:{name}"]
+                            elif kind == "groups":
+                                target_ids = [f"group:{name}"]
+                            for target_id in target_ids:
+                                await self.neo4j.upsert_edge(
+                                    identity_id, target_id, "CAN_ASSUME",
+                                    {"synthetic": True, "reason": "impersonate", "via_role": role_id},
+                                )
+                                edges_created += 1
+                    else:
+                        for target_id in high_priv_by_kind.get(node_type, []):
+                            if target_id == identity_id:
+                                continue  # don't emit "X can impersonate X"
+                            await self.neo4j.upsert_edge(
+                                identity_id, target_id, "CAN_ASSUME",
+                                {"synthetic": True, "reason": "impersonate_unrestricted", "via_role": role_id},
+                            )
+                            edges_created += 1
+
+            # ── bind / escalate ──
+            for verb, resource_set in (
+                ("bind", self._K8S_BIND_RESOURCES),
+                ("escalate", self._K8S_ESCALATE_RESOURCES),
+            ):
+                for rule in self._k8s_matching_rules(rules, verb, resource_set):
+                    resource_names = rule.get("resource_names") or []
+                    rule_resources = set(rule.get("resources") or [])
+                    if "*" in rule_resources:
+                        rule_resources = resource_set
+                    targets_cluster_roles = "clusterroles" in rule_resources
+                    targets_roles = "roles" in rule_resources
+
+                    if resource_names:
+                        for name in resource_names:
+                            candidate_ids = []
+                            if targets_cluster_roles:
+                                candidate_ids.append(name)
+                            if targets_roles:
+                                if is_cluster_role:
+                                    candidate_ids += [f"{ns}:{name}" for ns in data.namespaces]
+                                else:
+                                    candidate_ids.append(f"{role['namespace']}:{name}")
+                            for candidate_id in candidate_ids:
+                                if candidate_id in role_by_id or candidate_id in cluster_role_by_id:
+                                    await self.neo4j.upsert_edge(
+                                        identity_id, candidate_id, "CAN_ESCALATE_VIA",
+                                        {"verb": verb, "synthetic": True},
+                                    )
+                                    edges_created += 1
+                    else:
+                        pool = {}
+                        if targets_cluster_roles:
+                            pool.update(cluster_role_by_id)
+                        if targets_roles:
+                            pool.update(role_by_id)
+                        for other_id, other_role in pool.items():
+                            if other_role.get("privilege_level", 0) >= 4 and other_id != role_id:
+                                await self.neo4j.upsert_edge(
+                                    identity_id, other_id, "CAN_ESCALATE_VIA",
+                                    {"verb": f"{verb}_unrestricted", "synthetic": True},
+                                )
+                                edges_created += 1
+
+        return edges_created
+
     async def _ingest_k8s(self, data: Any) -> Dict:
         nodes_created = 0
         edges_created = 0
 
+        # ── Pass 1: identity nodes (ServiceAccounts) ──
         for sa in data.service_accounts:
-            node_id = f"k8s:sa:{sa['namespace']}:{sa['name']}"
+            node_id = sa["node_id"]  # reuse collector's ID, don't re-derive
             props = {
                 "id": node_id,
                 "name": sa["name"],
                 "namespace": sa["namespace"],
                 "provider": "k8s",
                 "node_type": "k8s_service_account",
-                "privilege_level": 2,
+                "privilege_level": 1,  # baseline; corrected in pass 3 below
             }
             props["risk_score"] = risk_scorer.score_node(props)
             await self.neo4j.upsert_node(node_id, ["Identity", "K8sServiceAccount"], props)
             nodes_created += 1
 
+        # ── Pass 1b: identity nodes for User/Group subjects ──
+        # Kubernetes has no "list users" API - Users and Groups only exist
+        # as names referenced inside bindings. Derive the distinct set from
+        # trust_relationships so they get real nodes instead of becoming
+        # bare MERGE stubs when edges are ingested.
+        seen_subject_ids = set()
         for trust in data.trust_relationships:
-            is_high_risk = trust.get("is_high_risk", False)
+            kind = trust.get("source_kind")
+            if kind not in ("User", "Group"):
+                continue
+            node_id = trust["source"]
+            if node_id in seen_subject_ids:
+                continue
+            seen_subject_ids.add(node_id)
+            name = node_id.split(":", 1)[1]
+            props = {
+                "id": node_id,
+                "name": name,
+                "provider": "k8s",
+                "node_type": f"k8s_{kind.lower()}",
+                "privilege_level": 1,  # corrected in pass 3
+            }
+            props["risk_score"] = risk_scorer.score_node(props)
+            await self.neo4j.upsert_node(node_id, ["Identity", f"K8s{kind}"], props)
+            nodes_created += 1
+
+        # ── Pass 2: role nodes (Roles + ClusterRoles) ──
+        for role in data.roles:
+            node_id = role["node_id"]
+            privilege = self._k8s_role_privilege(role, is_cluster_role=False)
+            role["privilege_level"] = privilege  # so Pass 5 can read it back off data.roles
+            props = {
+                "id": node_id,
+                "name": role["name"],
+                "namespace": role["namespace"],
+                "provider": "k8s",
+                "node_type": "k8s_role",
+                "privilege_level": privilege,
+            }
+            props["risk_score"] = risk_scorer.score_node(props)
+            await self.neo4j.upsert_node(node_id, ["Role", "K8sRole"], props)
+            nodes_created += 1
+
+        for cr in data.cluster_roles:
+            node_id = cr["node_id"]
+            privilege = self._k8s_role_privilege(cr, is_cluster_role=True)
+            cr["privilege_level"] = privilege  # so Pass 5 can read it back off data.cluster_roles
+            props = {
+                "id": node_id,
+                "name": cr["name"],
+                "provider": "k8s",
+                "node_type": "k8s_cluster_role",
+                "privilege_level": privilege,
+                "rules_may_be_incomplete": cr.get("rules_may_be_incomplete", False),
+            }
+            props["risk_score"] = risk_scorer.score_node(props)
+            await self.neo4j.upsert_node(node_id, ["Role", "K8sClusterRole"], props)
+            nodes_created += 1
+
+        # ── Pass 3: edges ──
+        for trust in data.trust_relationships:
             await self.neo4j.upsert_edge(
                 trust["source"], trust["target"], "BOUND_TO",
                 {
                     "namespace": trust.get("namespace"),
                     "binding_name": trust.get("binding_name"),
-                    "is_high_risk": is_high_risk,
+                    "is_high_risk": trust.get("is_high_risk", False),
+                    "is_wildcard_role": trust.get("is_wildcard_role", False),
                 },
             )
             edges_created += 1
+
+        # ── Pass 4: propagate privilege from bound roles onto identities ──
+        # Same principal_max_privilege pattern used to fix Azure/GCP in
+        # Week 4 - without this, every identity keeps the privilege_level=1
+        # baseline from pass 1 regardless of what it's actually bound to.
+        await self.neo4j.run_write_query(
+            """
+            MATCH (i:Identity)-[:BOUND_TO]->(r:Role)
+            WHERE i.provider = 'k8s'
+            WITH i, max(r.privilege_level) AS max_priv
+            SET i.privilege_level = max_priv
+            """
+        )
+        # risk_score depends on privilege_level, so recompute for k8s
+        # identities now that privilege has been propagated. If risk_scorer
+        # needs full node props (not just id), swap this for a fetch +
+        # score_node + upsert_node loop instead of raw Cypher.
+        await self.neo4j.run_write_query(
+            """
+            MATCH (i:Identity)
+            WHERE i.provider = 'k8s' AND i.privilege_level >= 4
+            SET i.risk_score = CASE WHEN i.risk_score < 0.7 THEN 0.7 ELSE i.risk_score END
+            """
+        )
+
+        # ── Pass 5: escalation primitives (impersonate/bind/escalate) ──
+        # Must run after pass 4 - "unrestricted" grant fan-out depends on
+        # privilege_level already being propagated onto Identity nodes.
+        edges_created += await self._compute_k8s_escalation_primitives(data)
 
         return {"nodes": nodes_created, "edges": edges_created}
 

@@ -13,6 +13,10 @@ from kubernetes.client.rest import ApiException
 
 logger = logging.getLogger(__name__)
 
+# Roles that are high-risk by name alone, even if TrustField can't see their
+# rules (e.g. built-in ClusterRoles whose manifests aren't reproduced here).
+HIGH_RISK_ROLE_NAMES = {"cluster-admin", "admin", "edit"}
+
 
 @dataclass
 class K8sRBACData:
@@ -71,6 +75,44 @@ class K8sCollector:
             logger.warning(f"Could not list namespaces: {exc}")
             return ["default"]
 
+    # ------------------------------------------------------------------
+    # Node ID helpers
+    #
+    # These are the single source of truth for how each RBAC object is
+    # identified as a graph node / edge endpoint. _build_trust_relationships
+    # must produce IDs that match these exactly, or edges will silently
+    # fail to resolve against their nodes at ingest time.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _service_account_id(namespace: str, name: str) -> str:
+        return f"{namespace}:{name}"
+
+    @staticmethod
+    def _role_id(namespace: str, name: str) -> str:
+        # Role names are only unique within a namespace - two different
+        # Roles named "editor" in different namespaces are different
+        # objects and must not collide into one node.
+        return f"{namespace}:{name}"
+
+    @staticmethod
+    def _cluster_role_id(name: str) -> str:
+        # ClusterRole names ARE cluster-wide unique, so no qualifier needed.
+        return name
+
+    @staticmethod
+    def _subject_id(kind: str, name: str, namespace: Optional[str]) -> str:
+        # ServiceAccounts are namespace-scoped identities - qualify them.
+        # User and Group are cluster-scoped identities in Kubernetes RBAC
+        # (there is no real per-namespace "user"), so they must NOT be
+        # qualified with whatever namespace a particular binding happens to
+        # live in. Doing so would fragment one real identity into multiple
+        # graph nodes (e.g. "ns-a:alice" and "ns-b:alice" for the same
+        # user), making cross-namespace escalation paths undetectable.
+        if kind == "ServiceAccount":
+            return f"{namespace}:{name}"
+        return f"{kind.lower()}:{name}"
+
     def _collect_service_accounts(self, namespaces: List[str]) -> List[Dict]:
         """Collect service accounts from all namespaces."""
         service_accounts = []
@@ -79,6 +121,7 @@ class K8sCollector:
                 sa_list = self._v1.list_namespaced_service_account(namespace=ns)
                 for sa in sa_list.items:
                     service_accounts.append({
+                        "node_id": self._service_account_id(sa.metadata.namespace, sa.metadata.name),
                         "name": sa.metadata.name,
                         "namespace": sa.metadata.namespace,
                         "uid": sa.metadata.uid,
@@ -100,6 +143,7 @@ class K8sCollector:
                 role_list = self._rbac_v1.list_namespaced_role(namespace=ns)
                 for role in role_list.items:
                     roles.append({
+                        "node_id": self._role_id(role.metadata.namespace, role.metadata.name),
                         "name": role.metadata.name,
                         "namespace": role.metadata.namespace,
                         "uid": role.metadata.uid,
@@ -108,6 +152,15 @@ class K8sCollector:
                                 "api_groups": r.api_groups or [],
                                 "resources": r.resources or [],
                                 "verbs": r.verbs or [],
+                                # NOTE: previously missing entirely for namespaced
+                                # Roles (only ClusterRole captured this) - meant
+                                # every restricted grant (e.g. bind/escalate/
+                                # impersonate limited to specific resourceNames)
+                                # on a Role silently looked unrestricted downstream.
+                                # Found via live-cluster test, not the fixture -
+                                # the fixture hand-built role dicts with this
+                                # field present, which didn't match real output.
+                                "resource_names": r.resource_names or [],
                             }
                             for r in (role.rules or [])
                         ],
@@ -124,19 +177,36 @@ class K8sCollector:
         try:
             cr_list = self._rbac_v1.list_cluster_role()
             for cr in cr_list.items:
+                is_aggregated = bool(cr.aggregation_rule)
+                rules = [
+                    {
+                        "api_groups": r.api_groups or [],
+                        "resources": r.resources or [],
+                        "verbs": r.verbs or [],
+                        "resource_names": r.resource_names or [],
+                    }
+                    for r in (cr.rules or [])
+                ]
+                if is_aggregated and not rules:
+                    # Kubernetes computes the effective rule set for
+                    # aggregated ClusterRoles dynamically via label
+                    # selector, at the control-plane level. The API object
+                    # itself often reports an empty `rules` list even
+                    # though real permissions apply. Flag this rather than
+                    # silently treating the role as a no-op - it's a known
+                    # detection gap, not a fixed-here bug.
+                    logger.warning(
+                        f"ClusterRole '{cr.metadata.name}' is aggregated with "
+                        f"no directly-declared rules; effective permissions "
+                        f"may be under-counted."
+                    )
                 cluster_roles.append({
+                    "node_id": self._cluster_role_id(cr.metadata.name),
                     "name": cr.metadata.name,
                     "uid": cr.metadata.uid,
-                    "rules": [
-                        {
-                            "api_groups": r.api_groups or [],
-                            "resources": r.resources or [],
-                            "verbs": r.verbs or [],
-                            "resource_names": r.resource_names or [],
-                        }
-                        for r in (cr.rules or [])
-                    ],
-                    "aggregation_rule": bool(cr.aggregation_rule),
+                    "rules": rules,
+                    "aggregation_rule": is_aggregated,
+                    "rules_may_be_incomplete": is_aggregated and not rules,
                     "node_type": "k8s_cluster_role",
                     "provider": "k8s",
                 })
@@ -203,32 +273,80 @@ class K8sCollector:
             logger.warning(f"ClusterRoleBinding collection failed: {exc}")
         return bindings
 
+    @staticmethod
+    def _rules_are_wildcard(rules: List[Dict]) -> bool:
+        """True if any rule grants '*' on resources or verbs (or both)."""
+        for rule in rules or []:
+            resources = rule.get("resources") or []
+            verbs = rule.get("verbs") or []
+            if "*" in resources or "*" in verbs:
+                return True
+        return False
+
+    def _build_role_rules_lookup(
+        self,
+        roles: List[Dict],
+        cluster_roles: List[Dict],
+    ) -> Dict[str, Dict]:
+        """
+        Map (kind, node_id) -> role dict, so trust-relationship building can
+        look up a role_ref's actual rules regardless of whether it's a
+        namespaced Role or a cluster-wide ClusterRole.
+        """
+        lookup = {}
+        for role in roles:
+            lookup[("Role", role["node_id"])] = role
+        for cr in cluster_roles:
+            lookup[("ClusterRole", cr["node_id"])] = cr
+        return lookup
+
     def _build_trust_relationships(
         self,
         role_bindings: List[Dict],
         cluster_role_bindings: List[Dict],
+        roles: List[Dict],
+        cluster_roles: List[Dict],
     ) -> List[Dict]:
         """
         Build trust edges from bindings:
-        subject → (bound_to) → role/clusterrole
-        Flags high-risk bindings (cluster-admin, wildcard resources).
+        subject → (BOUND_TO) → role/clusterrole
+        Flags high-risk bindings by name (cluster-admin/admin/edit) AND by
+        actual wildcard rule content, since custom ClusterRoles with
+        resources: ["*"], verbs: ["*"] are just as dangerous but wouldn't
+        be caught by a name-only check.
         """
-        HIGH_RISK_ROLES = {"cluster-admin", "admin", "edit"}
+        rules_lookup = self._build_role_rules_lookup(roles, cluster_roles)
         edges = []
 
         for binding in role_bindings + cluster_role_bindings:
+            role_kind = binding["role_ref"]["kind"]
             role_name = binding["role_ref"]["name"]
-            is_high_risk = role_name in HIGH_RISK_ROLES
+            binding_namespace = binding.get("namespace", "cluster")
+
+            if role_kind == "ClusterRole":
+                target_id = self._cluster_role_id(role_name)
+            else:
+                # A RoleBinding's role_ref of kind "Role" always refers to a
+                # Role in the binding's own namespace.
+                target_id = self._role_id(binding_namespace, role_name)
+
+            role_obj = rules_lookup.get((role_kind, target_id))
+            is_wildcard = self._rules_are_wildcard(role_obj["rules"]) if role_obj else False
+            is_high_risk = role_name in HIGH_RISK_ROLE_NAMES or is_wildcard
 
             for subject in binding.get("subjects", []):
+                source_id = self._subject_id(
+                    subject["kind"], subject["name"], subject.get("namespace")
+                )
                 edges.append({
-                    "source": f"{subject.get('namespace', '')}:{subject['name']}",
+                    "source": source_id,
                     "source_kind": subject["kind"],
-                    "target": role_name,
-                    "target_kind": binding["role_ref"]["kind"],
+                    "target": target_id,
+                    "target_kind": role_kind,
                     "relationship": "BOUND_TO",
-                    "namespace": binding.get("namespace", "cluster"),
+                    "namespace": binding_namespace,
                     "is_high_risk": is_high_risk,
+                    "is_wildcard_role": is_wildcard,
                     "binding_name": binding["name"],
                 })
 
@@ -272,7 +390,10 @@ class K8sCollector:
             logger.info(f"Collected {len(data.cluster_role_bindings)} cluster role bindings")
 
             data.trust_relationships = self._build_trust_relationships(
-                data.role_bindings, data.cluster_role_bindings
+                data.role_bindings,
+                data.cluster_role_bindings,
+                data.roles,
+                data.cluster_roles,
             )
             logger.info(f"Extracted {len(data.trust_relationships)} trust relationships")
 
