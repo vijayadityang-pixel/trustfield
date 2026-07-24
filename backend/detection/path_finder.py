@@ -124,7 +124,8 @@ RETURN
     target.name AS target_name,
     target.privilege_level AS privilege_level,
     source.provider AS provider,
-    r.verb AS verb
+    r.verb AS verb,
+    r.via_role AS via_role
 LIMIT $limit
 """
 
@@ -205,9 +206,10 @@ class PrivilegeEscalationPathFinder:
                 "target_name": record.get("target_name"),
                 "source_account": record.get("source_account"),
                 "target_account": record.get("target_account"),
+                "via_role": record.get("via_role"),
+                "verb": record.get("verb"),
             },
         )
-
     async def find_privilege_escalation_paths(
         self,
         cloud_provider: Optional[str] = None,

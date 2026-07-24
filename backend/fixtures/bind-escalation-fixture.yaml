@@ -1,0 +1,41 @@
+# fixtures/bind-escalation-fixture.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: trustfield-victim-sa
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: admin-role
+  namespace: default
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: bind-granter-role
+  namespace: default
+rules:
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles"]
+    resourceNames: ["admin-role"]
+    verbs: ["bind"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: bind-granter-binding
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: trustfield-victim-sa
+    namespace: default
+roleRef:
+  kind: Role
+  name: bind-granter-role
+  apiGroup: rbac.authorization.k8s.io

@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     AWS_ACCESS_KEY_ID: Optional[str] = None
     AWS_SECRET_ACCESS_KEY: Optional[str] = None
     AWS_ROLE_ARN: Optional[str] = None          # For cross-account collection
-
+    AWS_CONTAINMENT_ROLE_ARN: Optional[str] = None      # Role assumed for containment actions (write access)
     # ─── Azure ────────────────────────────────────────────────────────────────
     AZURE_SUBSCRIPTION_ID: Optional[str] = None
     AZURE_TENANT_ID: Optional[str] = None

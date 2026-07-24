@@ -190,7 +190,120 @@ class AWSContainmentEngine:
                 return {"action": ACTION_DENY_POLICY, "target": role_name}
 
         return await loop.run_in_executor(None, _attach)
+    async def rotate_keys(self, target: str) -> Dict:
+        """
+        Rotate access keys for an IAM user: create a new active key, then
+        deactivate every key that existed before rotation. New-key-first
+        ordering avoids a credential gap for legitimate automated
+        consumers of the key.
 
+        The new SecretAccessKey is deliberately excluded from the returned
+        result - ContainmentAction.result is persisted as plaintext JSON in
+        Postgres, and this API can be read back via GET /containment/actions/{id}.
+        Storing a live AWS secret there would be a real credential-leak
+        vector in a tool whose entire purpose is IAM security, so this
+        action is scoped to "invalidate old keys" rather than "hand a new
+        credential to an operator" - if a human needs the new secret, it
+        must be retrieved out-of-band (e.g. AWS console, audited channel),
+        not through this endpoint.
+        """
+        loop = asyncio.get_event_loop()
+        iam = await loop.run_in_executor(None, self._get_client, "iam")
+        username = target.split(":user/")[-1] if ":user/" in target else target
+
+        def _rotate():
+            old_keys = iam.list_access_keys(UserName=username)["AccessKeyMetadata"]
+            old_key_ids = [k["AccessKeyId"] for k in old_keys]
+
+            new_key = iam.create_access_key(UserName=username)["AccessKey"]
+
+            deactivated = []
+            for key_id in old_key_ids:
+                iam.update_access_key(
+                    UserName=username, AccessKeyId=key_id, Status="Inactive"
+                )
+                deactivated.append(key_id)
+
+            logger.warning(
+                f"Rotated keys for user {username}: created {new_key['AccessKeyId']}, "
+                f"deactivated {len(deactivated)} old key(s)"
+            )
+            return {
+                "action": ACTION_ROTATE_KEYS,
+                "target": username,
+                "new_access_key_id": new_key["AccessKeyId"],
+                "old_keys_deactivated": deactivated,
+                "note": "New secret access key was not persisted; retrieve via a secure out-of-band channel.",
+            }
+
+        return await loop.run_in_executor(None, _rotate)
+
+    async def block_ip(self, ip_address: str) -> Dict:
+        """
+        Block an IP address at the network layer by adding explicit deny
+        rules to the VPC's default Network ACL (both ingress and egress).
+
+        Uses NACLs rather than Security Groups, since SGs are allow-only
+        and have no deny semantics. AWS WAF was considered as an
+        alternative but requires a pre-existing Web ACL to attach an IP
+        set to, which target_resource (a bare IP string) doesn't carry -
+        NACL deny rules are the option that works with no pre-existing
+        infrastructure.
+        """
+        loop = asyncio.get_event_loop()
+        ec2 = await loop.run_in_executor(None, self._get_client, "ec2")
+
+        def _block():
+            vpcs = ec2.describe_vpcs(Filters=[{"Name": "is-default", "Values": ["true"]}])["Vpcs"]
+            if not vpcs:
+                raise ValueError("No default VPC found in region; cannot determine target NACL")
+            vpc_id = vpcs[0]["VpcId"]
+
+            nacls = ec2.describe_network_acls(
+                Filters=[
+                    {"Name": "vpc-id", "Values": [vpc_id]},
+                    {"Name": "default", "Values": ["true"]},
+                ]
+            )["NetworkAcls"]
+            if not nacls:
+                raise ValueError(f"No default NACL found for VPC {vpc_id}")
+            nacl_id = nacls[0]["NetworkAclId"]
+
+            existing_entries = nacls[0]["Entries"]
+            used_numbers = {e["RuleNumber"] for e in existing_entries if e["RuleNumber"] < 32767}
+            rule_number = max(used_numbers, default=90) + 1
+            while rule_number in used_numbers:
+                rule_number += 1
+
+            cidr = f"{ip_address}/32"
+
+            ec2.create_network_acl_entry(
+                NetworkAclId=nacl_id,
+                RuleNumber=rule_number,
+                Protocol="-1",
+                RuleAction="deny",
+                Egress=False,
+                CidrBlock=cidr,
+            )
+            ec2.create_network_acl_entry(
+                NetworkAclId=nacl_id,
+                RuleNumber=rule_number,
+                Protocol="-1",
+                RuleAction="deny",
+                Egress=True,
+                CidrBlock=cidr,
+            )
+
+            logger.warning(f"Blocked IP {ip_address} via NACL {nacl_id}, rule {rule_number}")
+            return {
+                "action": ACTION_BLOCK_IP,
+                "target": ip_address,
+                "vpc_id": vpc_id,
+                "nacl_id": nacl_id,
+                "rule_number": rule_number,
+            }
+
+        return await loop.run_in_executor(None, _block)
     async def isolate_ec2(self, instance_id: str) -> Dict:
         """
         Isolate an EC2 instance by moving it to an isolation security group.
@@ -246,6 +359,8 @@ class AWSContainmentEngine:
             ACTION_DISABLE_ACCOUNT: self.disable_account,
             ACTION_DENY_POLICY: self.attach_deny_all_policy,
             ACTION_ISOLATE_RESOURCE: self.isolate_ec2,
+            ACTION_ROTATE_KEYS: self.rotate_keys,
+            ACTION_BLOCK_IP: self.block_ip,
         }
 
         handler = dispatch.get(action_type)

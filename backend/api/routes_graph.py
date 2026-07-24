@@ -3,7 +3,7 @@ TrustField - Graph Routes
 Exposes trust graph data for visualization and analysis.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from sqlalchemy.orm import Session
 from typing import List, Optional
 import logging
@@ -159,6 +159,7 @@ async def get_escalation_paths(
                 risk_score=p.risk_score,
                 attack_techniques=[p.mitre_technique] if p.mitre_technique else [],
                 cloud_provider=p.cloud_provider,
+                metadata=p.metadata,
             )
             for p in paths
         ]
@@ -192,12 +193,15 @@ async def get_path_between_nodes(
         risk_score=path.risk_score,
         attack_techniques=[path.mitre_technique] if path.mitre_technique else [],
         cloud_provider=path.cloud_provider,
+        metadata=path.metadata,
     )
 
 
 @router.post("/refresh")
 async def refresh_graph(
+    background_tasks: BackgroundTasks,
     cloud_provider: Optional[str] = None,
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -205,7 +209,17 @@ async def refresh_graph(
     This is an async operation — check /scan/status for progress.
     """
     from api.routes_scan import trigger_scan
-    return await trigger_scan(cloud_provider=cloud_provider, current_user=current_user)
+    from schemas.scan_schemas import ScanRequest
+
+    scan_request = ScanRequest(
+        providers=[cloud_provider] if cloud_provider else None,
+    )
+    return await trigger_scan(
+        request=scan_request,
+        background_tasks=background_tasks,
+        db=db,
+        current_user=current_user,
+    )
 
 
 @router.get("/subgraph/{node_id:path}", response_model=GraphResponse)

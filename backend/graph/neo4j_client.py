@@ -306,6 +306,7 @@ class Neo4jClient:
         """Create Neo4j indexes and constraints for performance."""
         indexes = [
             "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Identity) REQUIRE n.id IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Role) REQUIRE n.id IS UNIQUE",
             "CREATE INDEX IF NOT EXISTS FOR (n:Identity) ON (n.provider)",
             "CREATE INDEX IF NOT EXISTS FOR (n:Identity) ON (n.risk_score)",
             "CREATE INDEX IF NOT EXISTS FOR (n:Identity) ON (n.node_type)",

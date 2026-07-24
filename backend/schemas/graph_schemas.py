@@ -87,7 +87,7 @@ class EscalationPathResponse(BaseModel):
     attack_techniques: Optional[List[str]] = None   # MITRE ATT&CK technique IDs
     cloud_provider: Optional[str] = None
     detected_at: Optional[datetime] = None
-
+    metadata: Optional[Dict] = None
 
 # ─── Node search ──────────────────────────────────────────────────────────────
 

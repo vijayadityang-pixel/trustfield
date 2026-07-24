@@ -19,6 +19,7 @@ from containment.k8s_response import K8sContainmentEngine
 from containment.playbooks import PlaybookEngine
 from containment.notifier import AlertNotifier
 from config import settings
+from graph.neo4j_client import Neo4jClient
 from schemas.containment_schemas import (
     ContainmentRequest,
     ContainmentResponse,
@@ -30,7 +31,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/containment", tags=["Containment"])
 
 # Engine singletons (injected via DI in production)
-aws_engine = AWSContainmentEngine()
+aws_engine = AWSContainmentEngine(role_arn=settings.AWS_CONTAINMENT_ROLE_ARN)
 azure_engine = AzureContainmentEngine()
 k8s_engine = K8sContainmentEngine(
     kubeconfig_path=settings.K8S_KUBECONFIG_PATH,
@@ -39,6 +40,7 @@ k8s_engine = K8sContainmentEngine(
 )
 playbook_engine = PlaybookEngine()
 notifier = AlertNotifier()
+neo4j_client = Neo4jClient()
 
 
 async def _execute_containment(
@@ -110,6 +112,43 @@ async def _execute_containment(
             await notifier.send_containment_notification(action)
         db.close()
 
+@router.get("/resolve/k8s-binding")
+async def resolve_k8s_binding(
+    identity_id: str,
+    via_role: str,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Resolve a k8s_escalation_primitive finding's identity + via_role into
+    the actual RoleBinding/ClusterRoleBinding that grants the bind/escalate
+    access, so it can be passed as target_resource to REMOVE_ROLE_BINDING.
+
+    Bridges the synthetic CAN_ESCALATE_VIA edge (which points at the
+    dangerous target role the identity could escalate to) back to the real
+    BOUND_TO edge (which points at via_role, the role the identity already
+    holds that grants the bind/escalate verb) - that BOUND_TO grant is the
+    actual access that needs revoking, not the target role.
+    """
+    records = await neo4j_client.run_query(
+        """
+        MATCH (i:Identity {id: $identity_id})-[b:BOUND_TO]->(r:Role {id: $via_role})
+        RETURN b.namespace AS namespace, b.binding_name AS binding_name
+        LIMIT 1
+        """,
+        {"identity_id": identity_id, "via_role": via_role},
+    )
+    if not records:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No BOUND_TO edge found between '{identity_id}' and '{via_role}'",
+        )
+    rec = records[0]
+    if rec.get("namespace"):
+        target_resource = f"k8s:rolebinding:{rec['namespace']}:{rec['binding_name']}"
+    else:
+        target_resource = f"k8s:clusterrolebinding:{rec['binding_name']}"
+
+    return {"target_resource": target_resource}
 
 @router.post("/trigger", response_model=ContainmentResponse, status_code=status.HTTP_202_ACCEPTED)
 async def trigger_containment(
