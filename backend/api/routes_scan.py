@@ -13,7 +13,7 @@ import uuid
 import os
 
 from db.database import get_db, SessionLocal
-from db.models import ScanJob, ScanStatus, User
+from db.models import ScanJob, ScanStatus, User, UserRole
 from auth.dependencies import get_current_user, require_role
 from collectors.aws_collector import AWSCollector
 from collectors.azure_collector import AzureCollector
@@ -214,7 +214,7 @@ async def get_scan_job(
 async def cancel_scan(
     job_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role(["admin"])),
+    current_user: User = Depends(require_role(UserRole.ADMIN)),
 ):
     """Cancel a pending or running scan job (admin only)."""
     job = db.query(ScanJob).filter(ScanJob.id == job_id).first()

@@ -474,7 +474,7 @@ class TrustGraphBuilder:
                                 if candidate_id in role_by_id or candidate_id in cluster_role_by_id:
                                     await self.neo4j.upsert_edge(
                                         identity_id, candidate_id, "CAN_ESCALATE_VIA",
-                                        {"verb": verb, "synthetic": True},
+                                        {"verb": verb, "synthetic": True,"via_role": role_id},
                                     )
                                     edges_created += 1
                     else:
@@ -487,7 +487,7 @@ class TrustGraphBuilder:
                             if other_role.get("privilege_level", 0) >= 4 and other_id != role_id:
                                 await self.neo4j.upsert_edge(
                                     identity_id, other_id, "CAN_ESCALATE_VIA",
-                                    {"verb": f"{verb}_unrestricted", "synthetic": True},
+                                    {"verb": f"{verb}_unrestricted", "synthetic": True, "via_role": role_id},
                                 )
                                 edges_created += 1
 
