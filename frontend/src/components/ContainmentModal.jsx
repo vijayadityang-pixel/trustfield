@@ -2,40 +2,86 @@ import { useEffect, useState } from 'react'
 import { X, ShieldOff, AlertTriangle, CheckCircle2, Loader2 } from 'lucide-react'
 import { triggerContainment } from '../services/api'
 
-// Static catalog — backend does not yet expose a per-alert action menu.
-// Types must match the action_type values accepted by POST /containment/trigger.
-const ACTION_CATALOG = [
-  {
-    type: 'REVOKE_CREDENTIALS',
-    label: 'Revoke credentials',
-    description: 'Immediately invalidate active credentials for this identity.',
-    reversible: false,
-  },
-  {
-    type: 'DISABLE_ACCOUNT',
-    label: 'Disable account',
-    description: 'Suspend the account/identity from further access.',
-    reversible: true,
-  },
-  {
-    type: 'ISOLATE_RESOURCE',
-    label: 'Isolate resource',
-    description: 'Cut network/access isolation around the affected resource.',
-    reversible: true,
-  },
-  {
-    type: 'BLOCK_IP',
-    label: 'Block IP',
-    description: 'Block the source IP associated with this activity.',
-    reversible: true,
-  },
-  {
-    type: 'ROTATE_KEYS',
-    label: 'Rotate keys',
-    description: 'Rotate access keys/secrets for the affected identity.',
-    reversible: true,
-  },
-]
+// Action types must match exactly what each cloud engine's execute()
+// dispatch table accepts (containment/{aws,azure,k8s}_response.py).
+// Catalog is keyed by cloud_provider since each backend engine only
+// supports its own action set - showing AWS-only actions for a k8s
+// alert (or vice versa) would let a user select something that fails
+// immediately on execute().
+const CATALOG_BY_PROVIDER = {
+  aws: [
+    {
+      type: 'REVOKE_CREDENTIALS',
+      label: 'Revoke credentials',
+      description: 'Delete access keys (user) or revoke active sessions (role).',
+      reversible: false,
+    },
+    {
+      type: 'DISABLE_ACCOUNT',
+      label: 'Disable account',
+      description: 'Remove console login and deactivate access keys.',
+      reversible: true,
+    },
+    {
+      type: 'ATTACH_DENY_ALL_POLICY',
+      label: 'Attach deny-all policy',
+      description: 'Lock out the identity immediately while preserving it for investigation.',
+      reversible: true,
+    },
+    {
+      type: 'ISOLATE_RESOURCE',
+      label: 'Isolate EC2 instance',
+      description: 'Move the instance to an empty isolation security group.',
+      reversible: true,
+    },
+    {
+      type: 'ROTATE_KEYS',
+      label: 'Rotate access keys',
+      description: 'Create a new access key and deactivate all existing keys.',
+      reversible: false,
+    },
+    {
+      type: 'BLOCK_IP',
+      label: 'Block IP',
+      description: 'Add a deny rule for this IP to the default VPC network ACL.',
+      reversible: true,
+    },
+  ],
+  azure: [
+    {
+      type: 'DISABLE_ACCOUNT',
+      label: 'Disable account',
+      description: 'Disable the Azure AD user or service principal and revoke tokens.',
+      reversible: true,
+    },
+    {
+      type: 'REVOKE_CREDENTIALS',
+      label: 'Revoke credentials',
+      description: 'Revoke all sign-in sessions and refresh tokens for this user.',
+      reversible: false,
+    },
+    {
+      type: 'REMOVE_ROLE_ASSIGNMENT',
+      label: 'Remove role assignment',
+      description: 'Delete a specific RBAC role assignment.',
+      reversible: false,
+    },
+    {
+      type: 'DISABLE_SERVICE_PRINCIPAL',
+      label: 'Disable service principal',
+      description: 'Disable the Azure AD service principal.',
+      reversible: true,
+    },
+  ],
+  k8s: [
+    {
+      type: 'REMOVE_ROLE_BINDING',
+      label: 'Remove role binding',
+      description: 'Delete the RoleBinding or ClusterRoleBinding granting this access.',
+      reversible: false,
+    },
+  ],
+}
 
 export default function ContainmentModal({ alert, onClose, onExecuted }) {
   const [status, setStatus] = useState('ready') // ready | confirming | executing | done | exec_error
@@ -50,6 +96,9 @@ export default function ContainmentModal({ alert, onClose, onExecuted }) {
   }, [alert])
 
   if (!alert) return null
+
+  const provider = (alert.cloud_provider || '').toLowerCase()
+  const actions = CATALOG_BY_PROVIDER[provider] || []
 
   async function handleExecute() {
     setStatus('executing')
@@ -102,8 +151,14 @@ export default function ContainmentModal({ alert, onClose, onExecuted }) {
 
         {(status === 'ready' || status === 'confirming') && (
           <>
+            {actions.length === 0 && (
+              <div style={{ fontSize: 12.5, color: 'var(--text-muted)', marginBottom: 16 }}>
+                No containment actions are available for provider "{alert.cloud_provider || 'unknown'}".
+              </div>
+            )}
+
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
-              {ACTION_CATALOG.map((action) => (
+              {actions.map((action) => (
                 <label
                   key={action.type}
                   style={{
