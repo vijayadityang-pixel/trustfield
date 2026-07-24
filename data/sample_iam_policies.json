@@ -1,0 +1,164 @@
+{
+  "aws": {
+    "roles": [
+      {
+        "role_name": "vendor-billing-integration",
+        "role_arn": "arn:aws:iam::111122223333:role/vendor-billing-integration",
+        "trust_policy": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": { "AWS": "arn:aws:iam::999988887777:root" },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "attached_policies": [
+          {
+            "policy_name": "BillingFullAccess",
+            "document": {
+              "Version": "2012-10-17",
+              "Statement": [{ "Effect": "Allow", "Action": "*", "Resource": "*" }]
+            }
+          }
+        ],
+        "flags": ["missing_external_id", "wildcard_permissions"]
+      },
+      {
+        "role_name": "ci-deploy-role",
+        "role_arn": "arn:aws:iam::111122223333:role/ci-deploy-role",
+        "trust_policy": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": { "Federated": "arn:aws:iam::111122223333:oidc-provider/token.actions.githubusercontent.com" },
+              "Action": "sts:AssumeRoleWithWebIdentity",
+              "Condition": {
+                "StringLike": { "token.actions.githubusercontent.com:sub": "repo:trustfield-team/*" }
+              }
+            }
+          ]
+        },
+        "attached_policies": [
+          {
+            "policy_name": "DeployPermissions",
+            "document": {
+              "Version": "2012-10-17",
+              "Statement": [
+                { "Effect": "Allow", "Action": ["iam:PassRole", "lambda:CreateFunction", "lambda:InvokeFunction"], "Resource": "*" }
+              ]
+            }
+          }
+        ],
+        "flags": ["broad_oidc_subject", "passrole_with_lambda_create"]
+      },
+      {
+        "role_name": "data-analyst-readonly",
+        "role_arn": "arn:aws:iam::111122223333:role/data-analyst-readonly",
+        "trust_policy": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": { "AWS": "arn:aws:iam::111122223333:root" },
+              "Action": "sts:AssumeRole",
+              "Condition": { "StringEquals": { "sts:ExternalId": "tf-analyst-2024" } }
+            }
+          ]
+        },
+        "attached_policies": [
+          {
+            "policy_name": "ReadOnlyAnalytics",
+            "document": {
+              "Version": "2012-10-17",
+              "Statement": [{ "Effect": "Allow", "Action": ["athena:Get*", "athena:List*", "s3:GetObject"], "Resource": "arn:aws:s3:::tf-analytics-bucket/*" }]
+            }
+          }
+        ],
+        "flags": []
+      }
+    ],
+    "users": [
+      {
+        "user_name": "svc-legacy-etl",
+        "user_arn": "arn:aws:iam::111122223333:user/svc-legacy-etl",
+        "attached_policies": [
+          {
+            "policy_name": "LegacyEtlAccess",
+            "document": {
+              "Version": "2012-10-17",
+              "Statement": [{ "Effect": "Allow", "Action": ["iam:CreateAccessKey", "iam:AttachUserPolicy"], "Resource": "*" }]
+            }
+          }
+        ],
+        "flags": ["self_privilege_escalation_risk"]
+      }
+    ]
+  },
+  "azure": {
+    "managed_identities": [
+      {
+        "name": "mi-deploy-pipeline",
+        "resource_id": "/subscriptions/3b2f.../resourcegroups/tf-prod/providers/Microsoft.ManagedIdentity/userAssignedIdentities/mi-deploy-pipeline",
+        "federated_credentials": [
+          {
+            "name": "github-actions-fed",
+            "issuer": "https://token.actions.githubusercontent.com",
+            "subject": "repo:trustfield-team/*",
+            "audience": "api://AzureADTokenExchange"
+          }
+        ],
+        "role_assignments": [
+          { "role": "Contributor", "scope": "/subscriptions/3b2f..." }
+        ],
+        "flags": ["broad_federation_subject", "subscription_scope_contributor"]
+      }
+    ]
+  },
+  "gcp": {
+    "service_accounts": [
+      {
+        "email": "tf-ci-deployer@trustfield-prod.iam.gserviceaccount.com",
+        "roles": ["roles/owner"],
+        "bindings": [
+          {
+            "role": "roles/iam.serviceAccountTokenCreator",
+            "members": ["user:dev.contractor@external-vendor.com"]
+          }
+        ],
+        "flags": ["token_creator_to_owner_chain"]
+      },
+      {
+        "email": "tf-readonly@trustfield-prod.iam.gserviceaccount.com",
+        "roles": ["roles/viewer"],
+        "bindings": [],
+        "flags": []
+      }
+    ]
+  },
+  "kubernetes": {
+    "cluster": "tf-prod-cluster",
+    "service_accounts": [
+      {
+        "namespace": "checkout",
+        "name": "checkout-api-sa",
+        "automount_service_account_token": true,
+        "bindings": [
+          { "kind": "ClusterRoleBinding", "name": "checkout-admin-binding", "role_ref": "cluster-admin" }
+        ],
+        "flags": ["cluster_admin_binding_outside_system_namespace"]
+      },
+      {
+        "namespace": "monitoring",
+        "name": "prometheus-sa",
+        "automount_service_account_token": true,
+        "bindings": [
+          { "kind": "ClusterRoleBinding", "name": "prometheus-view-binding", "role_ref": "view" }
+        ],
+        "flags": []
+      }
+    ]
+  }
+}

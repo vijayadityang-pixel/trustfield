@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Route, ArrowRight, ShieldAlert, Info } from 'lucide-react'
+import { Route, ArrowRight } from 'lucide-react'
 import { fetchAlert } from '../services/api'
 
 const RISK_CLASS = (score) => {
@@ -25,7 +25,7 @@ export default function PathDetail({ alertId, onHighlightPath }) {
         setDetail(data)
         setStatus('ready')
         if (onHighlightPath) {
-          const hopIds = (data.path?.hops || []).map((h) => (typeof h === 'string' ? h : h.id))
+          const hopIds = (data.escalation_path || []).map((h) => (typeof h === 'string' ? h : h.id))
           onHighlightPath(hopIds)
         }
       })
@@ -55,8 +55,9 @@ export default function PathDetail({ alertId, onHighlightPath }) {
     )
   }
 
-  const hops = (detail.path?.hops || []).map((h) => (typeof h === 'string' ? { id: h, label: h, type: 'Identity' } : h))
-  const pattern = detail.pattern
+  const hops = (detail.escalation_path || []).map((h) =>
+    typeof h === 'string' ? { id: h, label: h, type: 'Identity' } : h
+  )
 
   return (
     <div className="card">
@@ -65,17 +66,20 @@ export default function PathDetail({ alertId, onHighlightPath }) {
           <Route size={15} color="var(--accent-trust)" />
           Escalation path
         </h3>
-        {detail.path?.risk_score != null && (
-          <span className={`badge badge-${RISK_CLASS(detail.path.risk_score)}`}>
+        {detail.risk_score != null && (
+          <span className={`badge badge-${RISK_CLASS(detail.risk_score)}`}>
             <span className="badge-dot" />
-            risk {detail.path.risk_score}
+            risk {detail.risk_score}
           </span>
         )}
       </div>
 
       {hops.length === 0 ? (
         <div className="empty-state" style={{ padding: '24px 0' }}>
-          <div>This alert isn't tied to a multi-hop path.</div>
+          <div>This alert isn't tied to a multi-hop path yet.</div>
+          <div style={{ fontSize: 11.5, color: 'var(--text-faint)', marginTop: 4 }}>
+            Escalation path detection is not yet running for this alert.
+          </div>
         </div>
       ) : (
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, overflowX: 'auto', paddingBottom: 8 }}>
@@ -98,34 +102,6 @@ export default function PathDetail({ alertId, onHighlightPath }) {
               {idx < hops.length - 1 && <ArrowRight size={15} color="var(--text-faint)" />}
             </div>
           ))}
-        </div>
-      )}
-
-      {pattern && (
-        <div style={{ marginTop: 18, borderTop: '1px solid var(--border)', paddingTop: 16 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-            <ShieldAlert size={14} color="var(--risk-high)" />
-            <span style={{ fontWeight: 600, fontSize: 13.5 }}>{pattern.name}</span>
-            <span className="mono" style={{ color: 'var(--text-faint)', fontSize: 11.5 }}>
-              {pattern.mitre_attack?.technique_id}
-            </span>
-          </div>
-          <p style={{ fontSize: 13, color: 'var(--text-muted)', lineHeight: 1.5, margin: '0 0 12px' }}>
-            {pattern.description}
-          </p>
-          {pattern.indicators?.length > 0 && (
-            <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: 'var(--text-faint)', marginBottom: 6 }}>
-                <Info size={12} />
-                INDICATORS
-              </div>
-              <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12.5, color: 'var(--text-muted)', lineHeight: 1.6 }}>
-                {pattern.indicators.map((ind, i) => (
-                  <li key={i}>{ind}</li>
-                ))}
-              </ul>
-            </div>
-          )}
         </div>
       )}
     </div>
