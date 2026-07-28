@@ -161,6 +161,119 @@ async def test_role_chaining_depth_two_detected_at_exact_boundary():
 
 
 @pytest.mark.asyncio
+async def test_role_chaining_ignores_actual_target_privilege_level():
+    """
+    QUERY_ROLE_CHAINING correctly returns 'depth' (confirmed by the
+    depth-boundary test above), but it never SELECTs target.privilege_level
+    even though its WHERE clause requires target.privilege_level >= 4.
+    _record_to_path()'s record.get('privilege_level', 4) default therefore
+    applies unconditionally - a genuinely root-level (privilege_level=5)
+    target scores IDENTICALLY to a merely admin-level (privilege_level=4)
+    one, at the same depth. This under-reports risk for chains that
+    actually reach root.
+    """
+    tag = "test-detreg-rolechain-privlvl"
+    neo4j = Neo4jClient()
+    try:
+        await neo4j.connect()
+        await _seed(neo4j, """
+            CREATE (a:Identity {id: $a, name: 'chainer-to-admin', provider: $tag, privilege_level: 1})
+            CREATE (b:Identity {id: $b, name: 'mid-admin', provider: $tag, privilege_level: 2})
+            CREATE (admin:Identity {id: $admin, name: 'admin-target', provider: $tag, privilege_level: 4})
+            CREATE (c:Identity {id: $c, name: 'chainer-to-root', provider: $tag, privilege_level: 1})
+            CREATE (d:Identity {id: $d, name: 'mid-root', provider: $tag, privilege_level: 2})
+            CREATE (root:Identity {id: $root, name: 'root-target', provider: $tag, privilege_level: 5})
+            CREATE (a)-[:CAN_ASSUME]->(b)
+            CREATE (b)-[:CAN_ASSUME]->(admin)
+            CREATE (c)-[:CAN_ASSUME]->(d)
+            CREATE (d)-[:CAN_ASSUME]->(root)
+        """, {"a": f"{tag}:chainer-admin", "b": f"{tag}:mid-admin", "admin": f"{tag}:admin-target",
+              "c": f"{tag}:chainer-root", "d": f"{tag}:mid-root", "root": f"{tag}:root-target",
+              "tag": tag})
+
+        finder = PrivilegeEscalationPathFinder(neo4j)
+        raw_paths = await finder.find_role_chaining(cloud_provider=tag)
+        assert len(raw_paths) == 2
+
+        scores_by_target = {p.target_node: p.risk_score for p in raw_paths}
+        admin_score = scores_by_target[f"{tag}:admin-target"]
+        root_score = scores_by_target[f"{tag}:root-target"]
+
+        assert admin_score == 0.5
+        assert root_score == 0.5, (
+            "If this fails, target.privilege_level is now being read "
+            "correctly and this test (plus finding #2 in the Week 8 "
+            "writeup) needs updating - a root target SHOULD score higher "
+            "(0.70) than an admin target (0.50) once fixed."
+        )
+    finally:
+        await _cleanup(neo4j, tag)
+        await neo4j.close()
+
+
+@pytest.mark.asyncio
+async def test_role_chaining_three_hop_to_root_silently_dropped():
+    """
+    Combines the depth-penalty and privilege_level-defaulting gaps: a
+    3-hop CAN_ASSUME chain to a genuinely root-level (privilege_level=5)
+    target is detected by the raw Cypher query, but because the scorer
+    treats every role_chaining target as privilege_level=4 regardless of
+    reality, the depth-3 penalty (0.20) drops it below min_risk=0.5
+    (0.60 - 0.20 = 0.40) even though a real attacker reaching root in 3
+    hops is materially dangerous. Same detected-but-not-alerted class as
+    test_privilege_escalation_three_hop_detected_but_filtered_by_aggregator.
+    """
+    tag = "test-detreg-rolechain-3hop-root"
+    neo4j = Neo4jClient()
+    try:
+        await neo4j.connect()
+        await _seed(neo4j, """
+            CREATE (a:Identity {id: $a, name: 'chainer', provider: $tag, privilege_level: 1})
+            CREATE (b:Identity {id: $b, name: 'hop1', provider: $tag, privilege_level: 2})
+            CREATE (c:Identity {id: $c, name: 'hop2', provider: $tag, privilege_level: 2})
+            CREATE (root:Identity {id: $root, name: 'root-target', provider: $tag, privilege_level: 5})
+            CREATE (a)-[:CAN_ASSUME]->(b)
+            CREATE (b)-[:CAN_ASSUME]->(c)
+            CREATE (c)-[:CAN_ASSUME]->(root)
+        """, {"a": f"{tag}:chainer", "b": f"{tag}:hop1", "c": f"{tag}:hop2",
+              "root": f"{tag}:root-target", "tag": tag})
+
+        finder = PrivilegeEscalationPathFinder(neo4j)
+        raw_paths = await finder.find_role_chaining(cloud_provider=tag)
+        # The *2..4 Cypher pattern matches every sub-chain ending at a
+        # qualifying target, not just the full path - so hop1->hop2->root
+        # (depth=2) fires as its own row alongside the full
+        # chainer->hop1->hop2->root (depth=3) row. Same row-multiplicity
+        # pattern as the privilege_escalation "once per qualifying node"
+        # finding, just triggered by sub-chains here instead of multiple
+        # qualifying sources. Isolate the specific 3-hop chain by source
+        # rather than assuming a single result.
+        assert len(raw_paths) == 2
+        by_source = {p.source_node: p for p in raw_paths}
+
+        full_chain = by_source[f"{tag}:chainer"]
+        sub_chain = by_source[f"{tag}:hop1"]
+        assert full_chain.risk_score == 0.4
+        assert sub_chain.risk_score == 0.5
+
+        filtered = await finder.find_escalation_paths(cloud_provider=tag, min_risk_score=0.5)
+        rc_hits = [p for p in filtered if p.escalation_type == "role_chaining"]
+        rc_sources = {p.source_node for p in rc_hits}
+        assert f"{tag}:chainer" not in rc_sources, (
+            "The full 3-hop chain (chainer -> root) should be detected by "
+            "the raw query but filtered from alerted results, purely "
+            "because target.privilege_level is never selected by the "
+            "query - a real Week 8 finding distinct from the depth=2 "
+            "boundary. The 2-hop hop1->root sub-chain legitimately clears "
+            "the bar on its own and is expected to still appear."
+        )
+        assert f"{tag}:hop1" in rc_sources
+    finally:
+        await _cleanup(neo4j, tag)
+        await neo4j.close()
+
+
+@pytest.mark.asyncio
 async def test_wildcard_trust_requires_principal_star():
     """
     QUERY_WILDCARD_TRUST matches ONLY on r.principal = '*'. A CAN_ASSUME
