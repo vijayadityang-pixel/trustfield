@@ -11,7 +11,8 @@ import asyncio
 import logging
 import uuid
 import os
-
+from detection.path_finder import PrivilegeEscalationPathFinder
+from detection.alert_generator import AlertGenerator
 from db.database import get_db, SessionLocal
 from db.models import ScanJob, ScanStatus, User, UserRole
 from auth.dependencies import get_current_user, require_role
@@ -34,7 +35,8 @@ router = APIRouter(prefix="/scan", tags=["Scans"])
 
 neo4j_client = Neo4jClient()
 graph_builder = TrustGraphBuilder(neo4j_client)
-
+path_finder = PrivilegeEscalationPathFinder(neo4j_client)
+alert_generator = AlertGenerator()
 COLLECTOR_MAP = {
     "aws": AWSCollector,
     "azure": AzureCollector,
@@ -101,11 +103,21 @@ async def _run_scan(scan_job_id: str, providers: List[str]):
         logger.info(f"[Scan {scan_job_id}] Building trust graph")
         graph_stats = await graph_builder.ingest_collected_data(all_data)
 
+        logger.info(f"[Scan {scan_job_id}] Running detection and generating alerts")
+        total_new_alerts = 0
+        for provider in providers:
+            try:
+                paths = await path_finder.find_escalation_paths(cloud_provider=provider, limit=100)
+                total_new_alerts += alert_generator.generate_alerts(db, paths)
+            except Exception as detect_exc:
+                logger.error(f"[Scan {scan_job_id}] Detection failed for {provider}: {detect_exc}", exc_info=True)
+
         scan_job.status = ScanStatus.COMPLETED
         scan_job.completed_at = datetime.utcnow()
         scan_job.nodes_discovered = graph_stats.get("nodes", 0)
         scan_job.edges_discovered = graph_stats.get("edges", 0)
         scan_job.providers_scanned = providers
+        scan_job.alerts_generated = total_new_alerts
         db.commit()
         logger.info(f"[Scan {scan_job_id}] Completed successfully: {graph_stats}")
 
@@ -258,4 +270,5 @@ async def get_scan_results(
         providers_scanned=job.providers_scanned,
         duration_seconds=(job.completed_at - job.started_at).total_seconds(),
         completed_at=job.completed_at,
+        alerts_generated=job.alerts_generated
     )

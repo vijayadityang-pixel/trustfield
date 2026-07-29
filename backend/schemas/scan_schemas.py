@@ -66,3 +66,5 @@ class ScanResultSummary(BaseModel):
     providers_scanned: Optional[List[str]] = None
     duration_seconds: Optional[float] = None
     completed_at: Optional[datetime] = None
+    alerts_generated: int
+    

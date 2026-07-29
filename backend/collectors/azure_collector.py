@@ -281,7 +281,7 @@ class AzureCollector:
             # any role — model as CAN_ASSUME to every high-privilege role
             # visible at this scope, same semantic as an AWS wildcard trust.
             if self._role_grants_self_escalation(role_def):
-                is_cross_scope = "/subscriptions/" in scope and scope.count("/") <= 2
+                is_broad_scope = "/subscriptions/" in scope and scope.count("/") <= 2
                 for target_role_id in high_priv_role_ids:
                     if target_role_id == assignment["role_definition_id"]:
                         continue
@@ -290,8 +290,8 @@ class AzureCollector:
                         "target": target_role_id,
                         "relationship": "CAN_ASSUME",
                         "principal": assignment["principal_id"],
-                        "condition": {"via": "roleAssignments/write", "scope": scope},
-                        "is_cross_account": is_cross_scope,
+                        "condition": {"via": "roleAssignments/write", "scope": scope, "broad_scope": is_broad_scope},
+                        "is_cross_account": False,
                     })
         return edges
 

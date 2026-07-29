@@ -105,12 +105,13 @@ class Alert(Base):
     confidence = Column(Float, default=0.0)
     detection_source = Column(String(100))              # rule_engine | ml_isolation_forest | gnn
     raw_evidence = Column(JSON)                         # Supporting data from detector
+    path_id = Column(String(32), index=True)            # Dedup key from EscalationPath.path_id
 
     # Graph context
     source_node_id = Column(String(255))
     target_node_id = Column(String(255))
     escalation_path = Column(JSON)                      # List of node IDs forming the path
-
+    
     # Analyst workflow
     analyst_notes = Column(Text)
     assigned_to = Column(Integer, ForeignKey("users.id"), nullable=True)

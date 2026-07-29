@@ -68,6 +68,7 @@ WITH source, target,
 RETURN
     source.id AS source_id,
     target.id AS target_id,
+    source.provider AS provider,
     chain,
     depth
 ORDER BY depth
