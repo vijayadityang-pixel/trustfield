@@ -69,6 +69,7 @@ RETURN
     source.id AS source_id,
     target.id AS target_id,
     source.provider AS provider,
+    target.privilege_level AS privilege_level,
     chain,
     depth
 ORDER BY depth

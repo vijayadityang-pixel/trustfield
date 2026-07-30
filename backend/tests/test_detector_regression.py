@@ -161,16 +161,16 @@ async def test_role_chaining_depth_two_detected_at_exact_boundary():
 
 
 @pytest.mark.asyncio
-async def test_role_chaining_ignores_actual_target_privilege_level():
+async def test_role_chaining_now_reflects_actual_target_privilege_level():
     """
-    QUERY_ROLE_CHAINING correctly returns 'depth' (confirmed by the
-    depth-boundary test above), but it never SELECTs target.privilege_level
-    even though its WHERE clause requires target.privilege_level >= 4.
-    _record_to_path()'s record.get('privilege_level', 4) default therefore
-    applies unconditionally - a genuinely root-level (privilege_level=5)
-    target scores IDENTICALLY to a merely admin-level (privilege_level=4)
-    one, at the same depth. This under-reports risk for chains that
-    actually reach root.
+    QUERY_ROLE_CHAINING previously never SELECTed target.privilege_level
+    even though its WHERE clause requires target.privilege_level >= 4, so
+    _record_to_path()'s record.get('privilege_level', 4) default applied
+    unconditionally - a genuinely root-level (privilege_level=5) target
+    scored IDENTICALLY to a merely admin-level (privilege_level=4) one, at
+    the same depth. Fixed Week 8 by adding
+    target.privilege_level AS privilege_level to the RETURN clause - a
+    root target now correctly scores higher than an admin target.
     """
     tag = "test-detreg-rolechain-privlvl"
     neo4j = Neo4jClient()
@@ -200,28 +200,28 @@ async def test_role_chaining_ignores_actual_target_privilege_level():
         root_score = scores_by_target[f"{tag}:root-target"]
 
         assert admin_score == 0.5
-        assert root_score == 0.5, (
-            "If this fails, target.privilege_level is now being read "
-            "correctly and this test (plus finding #2 in the Week 8 "
-            "writeup) needs updating - a root target SHOULD score higher "
-            "(0.70) than an admin target (0.50) once fixed."
+        assert root_score == 0.7, (
+            "Root target (privilege_level=5) should score higher than "
+            "admin target (privilege_level=4) now that target.privilege_level "
+            "is correctly selected and read - Week 8 fix."
         )
+        assert root_score > admin_score
     finally:
         await _cleanup(neo4j, tag)
         await neo4j.close()
 
 
 @pytest.mark.asyncio
-async def test_role_chaining_three_hop_to_root_silently_dropped():
+async def test_role_chaining_three_hop_to_root_now_detected():
     """
-    Combines the depth-penalty and privilege_level-defaulting gaps: a
-    3-hop CAN_ASSUME chain to a genuinely root-level (privilege_level=5)
-    target is detected by the raw Cypher query, but because the scorer
-    treats every role_chaining target as privilege_level=4 regardless of
-    reality, the depth-3 penalty (0.20) drops it below min_risk=0.5
-    (0.60 - 0.20 = 0.40) even though a real attacker reaching root in 3
-    hops is materially dangerous. Same detected-but-not-alerted class as
-    test_privilege_escalation_three_hop_detected_but_filtered_by_aggregator.
+    Previously combined the depth-penalty and privilege_level-defaulting
+    gaps: a 3-hop CAN_ASSUME chain to a genuinely root-level
+    (privilege_level=5) target was detected by the raw Cypher query, but
+    because the scorer treated every role_chaining target as
+    privilege_level=4 regardless of reality, the depth-3 penalty (0.20)
+    dropped it below min_risk=0.5 (0.60 - 0.20 = 0.40). Fixed Week 8: with
+    target.privilege_level now correctly read, a root-level target scores
+    0.80*1.00 - 0.20 = 0.60, clearing the threshold.
     """
     tag = "test-detreg-rolechain-3hop-root"
     neo4j = Neo4jClient()
@@ -246,26 +246,25 @@ async def test_role_chaining_three_hop_to_root_silently_dropped():
         # chainer->hop1->hop2->root (depth=3) row. Same row-multiplicity
         # pattern as the privilege_escalation "once per qualifying node"
         # finding, just triggered by sub-chains here instead of multiple
-        # qualifying sources. Isolate the specific 3-hop chain by source
-        # rather than assuming a single result.
+        # qualifying sources.
         assert len(raw_paths) == 2
         by_source = {p.source_node: p for p in raw_paths}
 
         full_chain = by_source[f"{tag}:chainer"]
         sub_chain = by_source[f"{tag}:hop1"]
-        assert full_chain.risk_score == 0.4
-        assert sub_chain.risk_score == 0.5
+        assert full_chain.risk_score == 0.6, (
+            "3-hop chain to a root-level target: 0.80*1.00 - 0.20 = 0.60, "
+            "now clears min_risk=0.5 - previously scored 0.40 and was "
+            "silently dropped before target.privilege_level was wired in."
+        )
+        assert sub_chain.risk_score == 0.7  # 2-hop, root target: 0.80*1.00-0.10
 
         filtered = await finder.find_escalation_paths(cloud_provider=tag, min_risk_score=0.5)
         rc_hits = [p for p in filtered if p.escalation_type == "role_chaining"]
         rc_sources = {p.source_node for p in rc_hits}
-        assert f"{tag}:chainer" not in rc_sources, (
-            "The full 3-hop chain (chainer -> root) should be detected by "
-            "the raw query but filtered from alerted results, purely "
-            "because target.privilege_level is never selected by the "
-            "query - a real Week 8 finding distinct from the depth=2 "
-            "boundary. The 2-hop hop1->root sub-chain legitimately clears "
-            "the bar on its own and is expected to still appear."
+        assert f"{tag}:chainer" in rc_sources, (
+            "The full 3-hop chain to root should now appear in alerted "
+            "results - Week 8 fix closed this detected-but-not-alerted gap."
         )
         assert f"{tag}:hop1" in rc_sources
     finally:
@@ -370,8 +369,10 @@ async def test_k8s_escalation_primitive_detected_via_can_escalate_via():
         finder = PrivilegeEscalationPathFinder(neo4j)
         raw_paths = await finder.find_k8s_escalation_primitives(cloud_provider=tag)
         assert len(raw_paths) == 1
-        assert raw_paths[0].risk_score == 0.5  # exact boundary, per risk_scorer tests
-        assert raw_paths[0].metadata["verb"] == "bind"
+        # 0.65 = base(0.75) * priv_weight(1.00) - depth_penalty(0.10).
+        # Was 0.50 (exact min_risk boundary) before k8s_escalation_primitive
+        # got a dedicated ESCALATION_TYPE_WEIGHTS entry - Week 8 fix.
+        assert raw_paths[0].risk_score == 0.65
         assert raw_paths[0].metadata["via_role"] == f"{tag}:bind-granter-role"
 
         filtered = await finder.find_escalation_paths(cloud_provider=tag, min_risk_score=0.5)

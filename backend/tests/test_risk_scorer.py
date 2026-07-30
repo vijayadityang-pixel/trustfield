@@ -158,26 +158,35 @@ class TestCrossAccountScoring:
 
 class TestK8sEscalationPrimitiveScoring:
     """
-    k8s_escalation_primitive: NOT in ESCALATION_TYPE_WEIGHTS, falls back to
-    the generic 0.60 default base weight. QUERY_K8S_ESCALATION_PRIMITIVE
-    returns neither 'depth' nor 'path_length', so _record_to_path's
-    record.get("depth", record.get("path_length", 2)) always defaults to 2.
-    Result: lands exactly on the 0.5 boundary for a level-5 target, same
-    fragility class as role_chaining.
+    k8s_escalation_primitive: has a dedicated base weight (0.75) as of
+    Week 8 - previously fell back to the generic 0.60 default and landed
+    exactly on the 0.5 min_risk boundary for a level-5 target (same
+    fragility class as role_chaining's old depth=2 knife-edge). Chosen
+    deliberately close to but below role_chaining (0.80) - same MITRE
+    T1548.005 technique, offset slightly to account for the known
+    is_wildcard false-positive class from built-in K8s controllers
+    (Week 6 finding). QUERY_K8S_ESCALATION_PRIMITIVE still returns neither
+    'depth' nor 'path_length', so _record_to_path's
+    record.get("depth", record.get("path_length", 2)) always defaults to
+    2 - that part is unchanged.
     """
 
-    def test_uses_fallback_base_weight_not_a_dedicated_one(self, scorer):
-        # Confirms "k8s_escalation_primitive" isn't a real key - if someone
-        # adds a dedicated weight for it later, this test's expected value
-        # will need updating, which is the point (regression tripwire).
+    def test_has_dedicated_base_weight(self, scorer):
+        # Previously fell back to the generic 0.60 default. Now has its
+        # own weight (0.75) - Week 8 fix, see risk_scorer.py comment for
+        # the reasoning (same MITRE technique as role_chaining, slightly
+        # lower to offset the known K8s built-in-controller noise class).
         from detection.risk_scorer import ESCALATION_TYPE_WEIGHTS
-        assert "k8s_escalation_primitive" not in ESCALATION_TYPE_WEIGHTS
+        assert ESCALATION_TYPE_WEIGHTS["k8s_escalation_primitive"] == 0.75
 
-    def test_default_depth_two_root_target_lands_on_exact_boundary(self, scorer):
+    def test_default_depth_two_root_target_now_has_headroom(self, scorer):
+        # 0.75 * 1.00 - 0.10 = 0.65 - real headroom above min_risk=0.5,
+        # no longer an exact boundary. Was 0.50 before the dedicated
+        # weight was added - Week 8 fix.
         score = scorer.score_path(
             path_length=2, privilege_level=5, escalation_type="k8s_escalation_primitive"
         )
-        assert score == 0.5
+        assert score == 0.65
         assert score >= 0.5
 
     def test_level_three_target_fails_despite_passing_query_filter(self, scorer):
@@ -185,10 +194,13 @@ class TestK8sEscalationPrimitiveScoring:
         # >= 3 through at the Cypher level, but the risk score for a level-3
         # target is nowhere near the alerting threshold - the raw detector
         # over-matches relative to what actually gets surfaced to a user.
+        # 0.75 * 0.45 - 0.10 = 0.2375. Was 0.17 with the old 0.60 fallback
+        # weight - still fails min_risk either way, but the exact value
+        # changed with the Week 8 dedicated-weight fix.
         score = scorer.score_path(
             path_length=2, privilege_level=3, escalation_type="k8s_escalation_primitive"
         )
-        assert score == 0.17
+        assert score == 0.2375
         assert score < 0.5
 
 

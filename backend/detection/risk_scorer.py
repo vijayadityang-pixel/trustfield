@@ -16,6 +16,17 @@ ESCALATION_TYPE_WEIGHTS = {
     "role_chaining": 0.80,
     "wildcard_trust": 0.85,
     "cross_account": 0.70,
+    # Previously missing - fell back to the generic 0.60 default, which
+    # combined with QUERY_K8S_ESCALATION_PRIMITIVE never returning depth
+    # (defaulting to 2) landed exactly on the min_risk=0.5 boundary for
+    # any level-5 target - same fragility class as role_chaining's old
+    # depth=2 knife-edge. 0.75 chosen deliberately: same MITRE T1548.005
+    # technique as role_chaining (0.80), set slightly lower to reflect
+    # the known is_wildcard false-positive class from built-in K8s
+    # controllers (Week 6 finding, ~25/40 K8s alerts in one real scan) -
+    # a real tradeoff, not a clean win: this also raises the score of
+    # those known-noisy alerts, not just the genuine findings.
+    "k8s_escalation_primitive": 0.75,
     "anomaly": 0.75,
 }
 
