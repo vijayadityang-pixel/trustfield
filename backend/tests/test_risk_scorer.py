@@ -5,19 +5,22 @@ These pin down exact boundary values discovered by reading path_finder.py's
 _record_to_path() call sites against risk_scorer.py's formula, BEFORE writing
 any integration test. Key findings encoded here as regression protection:
 
-1. _record_to_path() NEVER passes has_wildcard/is_cross_account/anomaly_score
-   to score_path() - those bonus terms are dead code from every real detector
-   call. Confirmed by reading the call site (only path_length, privilege_level,
-   escalation_type are passed).
+1. Previously, _record_to_path() never passed has_wildcard/is_cross_account/
+   anomaly_score to score_path(), leaving those bonus terms dead code from
+   every real detector call. Fixed Week 8: is_cross_account is now derived
+   from escalation_type == "cross_account", and has_wildcard from
+   escalation_type == "wildcard_trust", in _record_to_path().
 
 2. role_chaining only ever crosses min_risk=0.5 at exactly depth=2:
    0.80 * 0.75 - 0.10 = 0.50 (exact boundary, fragile to float drift).
    depth=3 -> 0.40 (fails). depth=4 -> 0.30 (fails).
 
-3. cross_account effectively only fires for privilege_level=5 (root) targets:
-   level 5 -> 0.70 * 1.00 - 0.10 = 0.60 (passes)
-   level 4 -> 0.70 * 0.75 - 0.10 = 0.425 (FAILS - real detection gap: an
-   "account admin" cross-account trust is invisible today, only root is caught)
+3. cross_account previously only fired for privilege_level=5 (root) targets
+   without the is_cross_account bonus:
+   level 5 -> 0.70 * 1.00 - 0.10 = 0.60 (passed)
+   level 4 -> 0.70 * 0.75 - 0.10 = 0.425 (failed - real gap)
+   Fixed Week 8: is_cross_account=True is now always passed for this
+   escalation_type, adding +0.10 - level 4 now scores 0.525 and passes too.
 
 4. "k8s_escalation_primitive" is NOT a key in ESCALATION_TYPE_WEIGHTS, so it
    silently falls back to the generic 0.60 default. Combined with the query
@@ -118,29 +121,38 @@ class TestWildcardTrustScoring:
 
 class TestCrossAccountScoring:
     """
-    cross_account: base=0.70. Real detection gap - only privilege_level=5
-    (root) crosses min_risk=0.5. A cross-account trust into a level-4
-    "account admin" role currently produces NO alert.
+    cross_account: base=0.70. score_path() itself has always supported the
+    is_cross_account bonus (+0.10) - this class pins its raw behavior with
+    the bonus explicitly off/on. The real historical gap was that
+    _record_to_path() never passed is_cross_account=True despite
+    QUERY_CROSS_ACCOUNT guaranteeing it for every result - fixed Week 8,
+    see test_detector_regression.py for the integration-level confirmation.
     """
 
-    def test_root_target_passes(self, scorer):
+    def test_root_target_passes_without_bonus(self, scorer):
         score = scorer.score_path(
             path_length=2, privilege_level=5, escalation_type="cross_account"
         )
         assert score == 0.6
         assert score >= 0.5
 
-    def test_account_admin_target_fails_documenting_gap(self, scorer):
-        score = scorer.score_path(
+    def test_account_admin_target_needs_bonus_to_pass(self, scorer):
+        without_bonus = scorer.score_path(
             path_length=2, privilege_level=4, escalation_type="cross_account"
         )
-        assert score == 0.425
-        assert score < 0.5, (
-            "This documents a real detection gap (Week 8 finding): a "
-            "cross-account trust into an 'account admin' (privilege_level=4) "
-            "role scores below min_risk and is never surfaced, even though "
-            "it's a legitimate cross-account privilege escalation risk. "
-            "Only root/global-admin (privilege_level=5) targets are caught."
+        assert without_bonus == 0.425
+        assert without_bonus < 0.5
+
+        with_bonus = scorer.score_path(
+            path_length=2, privilege_level=4, escalation_type="cross_account",
+            is_cross_account=True,
+        )
+        assert with_bonus == 0.525
+        assert with_bonus >= 0.5, (
+            "Confirms the Week 8 fix: is_cross_account=True (now always "
+            "passed by _record_to_path() for this escalation_type) lifts "
+            "an account-admin-level cross-account trust over min_risk=0.5, "
+            "closing what was previously a real detection gap."
         )
 
 
@@ -180,12 +192,13 @@ class TestK8sEscalationPrimitiveScoring:
         assert score < 0.5
 
 
-class TestExposureBonusesAreDeadCodeFromRealDetectors:
+class TestExposureBonusParamsWorkInIsolation:
     """
-    Confirms finding #1: has_wildcard/is_cross_account/anomaly_score DO
-    change score_path()'s output when passed directly (the function itself
-    works correctly) - but _record_to_path() never passes them, so no real
-    detector output ever benefits from these bonuses today.
+    Confirms score_path()'s bonus params change output correctly when
+    passed directly. is_cross_account and has_wildcard are now wired
+    through by _record_to_path() for cross_account/wildcard_trust
+    respectively (Week 8 fix) - anomaly_score remains unwired from any
+    real detector, still a documented gap.
     """
 
     def test_wildcard_bonus_works_when_explicitly_passed(self, scorer):

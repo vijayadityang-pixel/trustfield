@@ -184,10 +184,25 @@ class PrivilegeEscalationPathFinder:
         target_id = record.get("target_id", "")
         node_ids = record.get("node_ids") or record.get("chain", [source_id, target_id])
 
+        # is_cross_account / has_wildcard were previously never passed here,
+        # leaving risk_scorer's bonus params dead code despite being fully
+        # implemented and tested in isolation (test_risk_scorer.py). Both are
+        # safe to derive from escalation_type rather than the raw record: the
+        # cross_account detector's own query (QUERY_CROSS_ACCOUNT) filters on
+        # r.is_cross_account = true, and the wildcard_trust detector's query
+        # (QUERY_WILDCARD_TRUST) filters on r.principal = '*' - so every
+        # result from either detector is true by construction, not a guess.
+        # This also fixes a real detection gap: without the cross_account
+        # bonus, a privilege_level=4 cross-account target scored 0.425 (raw
+        # base*priv_weight - depth_penalty) and was silently dropped by the
+        # aggregator's min_risk=0.5 filter, while only privilege_level=5
+        # targets (0.60) survived - see Week 8 punch list.
         risk = self.risk_scorer.score_path(
             path_length=record.get("depth", record.get("path_length", 2)),
             privilege_level=record.get("privilege_level", 4),
             escalation_type=escalation_type,
+            is_cross_account=(escalation_type == "cross_account"),
+            has_wildcard=(escalation_type == "wildcard_trust"),
         )
 
         return EscalationPath(

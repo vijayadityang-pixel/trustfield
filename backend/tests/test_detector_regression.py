@@ -296,19 +296,24 @@ async def test_wildcard_trust_requires_principal_star():
         raw_paths = await finder.find_wildcard_trust(cloud_provider=tag)
         assert len(raw_paths) == 1
         assert raw_paths[0].target_node == f"{tag}:open"
-        assert raw_paths[0].risk_score == 0.75  # privilege_level=5 case
+        # 0.90 = base(0.85) * priv_weight(1.00) - depth_penalty(0.10) + wildcard_bonus(0.15).
+        # Was 0.75 before is_cross_account/has_wildcard were wired into
+        # _record_to_path() - see Week 8 punch list fix.
+        assert raw_paths[0].risk_score == 0.90  # privilege_level=5 case, wildcard bonus now applied
     finally:
         await _cleanup(neo4j, tag)
         await neo4j.close()
 
 
 @pytest.mark.asyncio
-async def test_cross_account_root_passes_admin_level_fails():
+async def test_cross_account_admin_level_now_detected():
     """
-    Documents the real gap pinned in test_risk_scorer.py: cross-account
-    trust into a root (privilege_level=5) target passes min_risk=0.5,
-    but the same trust into an account-admin (privilege_level=4) target
-    does not, even though both have r.is_cross_account=true.
+    Previously documented a real gap: cross-account trust into a root
+    (privilege_level=5) target passed min_risk=0.5, but the same trust
+    into an account-admin (privilege_level=4) target did not, because
+    _record_to_path() never passed is_cross_account into score_path()
+    despite QUERY_CROSS_ACCOUNT guaranteeing it true for every result.
+    Fixed in Week 8 - both should now pass.
     """
     tag = "test-detreg-crossacct"
     neo4j = Neo4jClient()
@@ -331,10 +336,10 @@ async def test_cross_account_root_passes_admin_level_fails():
 
         filtered = await finder.find_escalation_paths(cloud_provider=tag, min_risk_score=0.5)
         cross_account_hits = [p for p in filtered if p.escalation_type == "cross_account"]
-        assert len(cross_account_hits) == 1, (
-            "Only the root-level (privilege_level=5) cross-account trust "
-            "should clear min_risk - the admin-level (privilege_level=4) "
-            "one scores 0.425 and is silently dropped. Real Week 8 gap."
+        assert len(cross_account_hits) == 2, (
+            "Both root-level (0.70) and admin-level (0.525) cross-account "
+            "trust should now clear min_risk after wiring is_cross_account "
+            "into score_path() - previously only root-level passed."
         )
         assert cross_account_hits[0].target_node == f"{tag}:root"
     finally:
