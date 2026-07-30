@@ -24,4 +24,4 @@ backend/*credentials*.json
 # Vite build artifacts
 .vite/
 
-backend/ml/models/
+backend/ml/models/backups/ 
