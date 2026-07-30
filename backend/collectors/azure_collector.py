@@ -29,6 +29,17 @@ DANGEROUS_AZURE_ACTIONS = {
 }
 
 BUILTIN_HIGH_PRIVILEGE_ROLES = {"Owner", "Contributor", "User Access Administrator"}
+
+# Actions that represent PURE self-escalation capability with no direct
+# resource access of their own. Excluded from _role_definition_privilege()'s
+# direct-access scoring so a role granting only roleAssignments/write isn't
+# scored as if it already has broad access - that capability is tracked
+# separately via _role_grants_self_escalation(). Deliberately narrower than
+# DANGEROUS_AZURE_ACTIONS: Microsoft.Authorization/* and
+# Microsoft.Authorization/*/write cover real authorization-namespace access
+# (policy assignments, locks, deny assignments) beyond just self-escalation,
+# so those stay counted toward direct-access scoring.
+SELF_ESCALATION_ONLY_ACTIONS = {"Microsoft.Authorization/roleAssignments/write"}
 @dataclass
 class AzureIAMData:
     """Container for all collected Azure IAM data."""
@@ -232,9 +243,16 @@ class AzureCollector:
             actions.update(perm.get("actions") or [])
         if "*" in actions:
             return 5
-        if any(a in DANGEROUS_AZURE_ACTIONS for a in actions):
+        # Exclude pure self-escalation actions before scoring direct access -
+        # see SELF_ESCALATION_ONLY_ACTIONS comment. Without this, a role
+        # granting ONLY roleAssignments/write scores 5 here, which then makes
+        # any principal holding it look already-maximally-privileged and
+        # disqualifies it as a QUERY_PRIVILEGE_ESCALATION source even though
+        # real CAN_ASSUME edges from it exist.
+        direct_access_actions = actions - SELF_ESCALATION_ONLY_ACTIONS
+        if any(a in DANGEROUS_AZURE_ACTIONS for a in direct_access_actions):
             return 5
-        if any(a.endswith("/write") or a.endswith("/*") for a in actions):
+        if any(a.endswith("/write") or a.endswith("/*") for a in direct_access_actions):
             return 3
         return 1
 
