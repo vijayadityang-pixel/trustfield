@@ -4,6 +4,8 @@ import { fetchAlerts, updateAlertStatus } from '../services/api'
 
 const SEVERITIES = ['critical', 'high', 'medium', 'low']
 const STATUSES = ['open', 'in_progress', 'resolved', 'dismissed']
+const PROVIDERS = ['aws', 'azure', 'gcp', 'k8s']
+
 
 function relativeTime(iso) {
   if (!iso) return ''
@@ -21,19 +23,21 @@ export default function AlertPanel({ onSelectAlert, selectedAlertId }) {
   const [status, setStatus] = useState('loading')
   const [severityFilter, setSeverityFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
+  const [providerFilter, setProviderFilter] = useState('')
 
   const load = useCallback(() => {
     setStatus('loading')
     fetchAlerts({
       severity: severityFilter || undefined,
       status: statusFilter || undefined,
+      cloud_provider: providerFilter || undefined,
     })
       .then((data) => {
         setAlerts(data || [])
         setStatus((data || []).length ? 'ready' : 'empty')
       })
       .catch(() => setStatus('error'))
-  }, [severityFilter, statusFilter])
+  }, [severityFilter, statusFilter, providerFilter])
 
   useEffect(() => {
     load()
@@ -67,6 +71,12 @@ export default function AlertPanel({ onSelectAlert, selectedAlertId }) {
             <option value="">All statuses</option>
             {STATUSES.map((s) => (
               <option key={s} value={s}>{s}</option>
+            ))}
+          </select>
+          <select className="select" value={providerFilter} onChange={(e) => setProviderFilter(e.target.value)}>
+            <option value="">All providers</option>
+            {PROVIDERS.map((p) => (
+              <option key={p} value={p}>{p}</option>
             ))}
           </select>
           <button className="btn btn-ghost" onClick={load} title="Refresh">

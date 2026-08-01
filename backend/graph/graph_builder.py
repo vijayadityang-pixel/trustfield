@@ -680,7 +680,7 @@ class TrustGraphBuilder:
             return {"nodes": [], "edges": []}
         return {
             "nodes": records[0].get("nodes", []),
-            "edges": records[0].get("edges", []),
+            "edges": [self._sanitize_neo4j_value(e) for e in records[0].get("edges", [])],
         }
 
     async def build_subgraph(
@@ -757,3 +757,14 @@ class TrustGraphBuilder:
                 if stmt.get("Action") == "*" and stmt.get("Resource") == "*":
                     return True
         return False
+    @staticmethod
+    def _sanitize_neo4j_value(value):
+        """Convert Neo4j native temporal types (DateTime, Date, etc.) to
+        JSON-safe strings before they hit a Pydantic response model."""
+        if hasattr(value, "iso_format"):
+            return value.iso_format()
+        if isinstance(value, dict):
+            return {k: TrustGraphBuilder._sanitize_neo4j_value(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [TrustGraphBuilder._sanitize_neo4j_value(v) for v in value]
+        return value

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { X, ShieldOff, AlertTriangle, CheckCircle2, Loader2, Info } from 'lucide-react'
-import { triggerContainment, fetchAlert, resolveK8sBinding, resolveGcpBinding } from '../services/api'
+import { triggerContainment, fetchAlert, resolveK8sBinding, resolveGcpBinding, fetchContainmentAction } from '../services/api'
 
 // Action types must match exactly what each cloud engine's execute()
 // dispatch table accepts (containment/{aws,azure,k8s,gcp}_response.py).
@@ -99,10 +99,27 @@ const CATALOG_BY_PROVIDER = {
 // alert.resource_id directly.
 const PROVIDERS_REQUIRING_RESOLUTION = new Set(['k8s', 'gcp'])
 
+// /containment/trigger only queues a background task and returns
+// immediately with status "pending" - it does NOT wait for the real
+// setIamPolicy/kubectl/boto3 call to finish. Without polling here, the
+// UI would show "Action executed" success even when the underlying
+// action later fails (confirmed live: a real GCP 403 PERMISSION_DENIED
+// still showed a success message before this fix).
+async function pollContainmentAction(actionId, { intervalMs = 800, timeoutMs = 15000 } = {}) {
+  const start = Date.now()
+  while (Date.now() - start < timeoutMs) {
+    const action = await fetchContainmentAction(actionId)
+    if (action.status === 'completed' || action.status === 'failed') return action
+    await new Promise((r) => setTimeout(r, intervalMs))
+  }
+  throw new Error('Timed out waiting for containment action to finish.')
+}
+
 export default function ContainmentModal({ alert, onClose, onExecuted }) {
   const [status, setStatus] = useState('ready') // ready | confirming | executing | done | exec_error
   const [selected, setSelected] = useState(null)
   const [ackIrreversible, setAckIrreversible] = useState(false)
+  const [execError, setExecError] = useState(null)
 
   // resolveState.status: 'idle' | 'resolving' | 'resolved' | 'unsupported' | 'error'
   const [resolveState, setResolveState] = useState({ status: 'idle', targetResource: null, message: null })
@@ -112,6 +129,7 @@ export default function ContainmentModal({ alert, onClose, onExecuted }) {
     setStatus('ready')
     setSelected(null)
     setAckIrreversible(false)
+    setExecError(null)
     setResolveState({ status: 'idle', targetResource: null, message: null })
 
     const provider = (alert.cloud_provider || '').toLowerCase()
@@ -191,17 +209,25 @@ export default function ContainmentModal({ alert, onClose, onExecuted }) {
 
   async function handleExecute() {
     setStatus('executing')
+    setExecError(null)
     try {
       const targetResource = needsResolution ? resolveState.targetResource : alert.resource_id
-      await triggerContainment(
+      const { action_id } = await triggerContainment(
         selected.type,
         alert.cloud_provider,
         targetResource,
         alert.id
       )
+      const finalAction = await pollContainmentAction(action_id)
+      if (finalAction.status === 'failed') {
+        setExecError(finalAction.error_message || 'The action failed. Check backend logs for details.')
+        setStatus('exec_error')
+        return
+      }
       setStatus('done')
       onExecuted && onExecuted()
-    } catch (_) {
+    } catch (err) {
+      setExecError(err.message || null)
       setStatus('exec_error')
     }
   }
@@ -357,7 +383,7 @@ export default function ContainmentModal({ alert, onClose, onExecuted }) {
           <div className="empty-state" style={{ padding: '24px 0' }}>
             <AlertTriangle size={24} color="var(--risk-critical)" />
             <div className="empty-state-title">Execution failed</div>
-            <div>The action wasn't applied. Check backend logs and try again.</div>
+            <div>{execError || "The action wasn't applied. Check backend logs and try again."}</div>
             <button className="btn" onClick={() => setStatus('ready')} style={{ marginTop: 8 }}>Back</button>
           </div>
         )}
