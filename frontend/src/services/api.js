@@ -216,3 +216,16 @@ export async function runPlaybook(playbookId, alertId) {
   })
   return data
 }
+export async function resolveK8sBinding(identityId, viaRole) {
+  const { data } = await client.get('/containment/resolve/k8s-binding', {
+    params: { identity_id: identityId, via_role: viaRole },
+  })
+  return data
+}
+
+export async function resolveGcpBinding(identityId, targetSaId) {
+  const { data } = await client.get('/containment/resolve/gcp-binding', {
+    params: { identity_id: identityId, target_sa_id: targetSaId },
+  })
+  return data
+}

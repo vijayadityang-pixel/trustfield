@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
-import { X, ShieldOff, AlertTriangle, CheckCircle2, Loader2 } from 'lucide-react'
-import { triggerContainment } from '../services/api'
+import { X, ShieldOff, AlertTriangle, CheckCircle2, Loader2, Info } from 'lucide-react'
+import { triggerContainment, fetchAlert, resolveK8sBinding, resolveGcpBinding } from '../services/api'
 
 // Action types must match exactly what each cloud engine's execute()
-// dispatch table accepts (containment/{aws,azure,k8s}_response.py).
+// dispatch table accepts (containment/{aws,azure,k8s,gcp}_response.py).
 // Catalog is keyed by cloud_provider since each backend engine only
 // supports its own action set - showing AWS-only actions for a k8s
 // alert (or vice versa) would let a user select something that fails
@@ -81,32 +81,122 @@ const CATALOG_BY_PROVIDER = {
       reversible: false,
     },
   ],
+  gcp: [
+    {
+      type: 'REMOVE_IAM_BINDING',
+      label: 'Remove IAM binding',
+      description: 'Revoke the specific role binding granting impersonation access to this service account.',
+      reversible: true,
+    },
+  ],
 }
+
+// Providers whose actions operate on a specific edge/binding rather than
+// a whole account, and therefore need a resolved target_resource fetched
+// from the backend before execution can work - alert.resource_id alone
+// is never enough for these (it's a Role or Identity node ID, not a
+// binding ID). AWS/Azure actions are account/resource-scoped and can use
+// alert.resource_id directly.
+const PROVIDERS_REQUIRING_RESOLUTION = new Set(['k8s', 'gcp'])
 
 export default function ContainmentModal({ alert, onClose, onExecuted }) {
   const [status, setStatus] = useState('ready') // ready | confirming | executing | done | exec_error
   const [selected, setSelected] = useState(null)
   const [ackIrreversible, setAckIrreversible] = useState(false)
 
+  // resolveState.status: 'idle' | 'resolving' | 'resolved' | 'unsupported' | 'error'
+  const [resolveState, setResolveState] = useState({ status: 'idle', targetResource: null, message: null })
+
   useEffect(() => {
     if (!alert) return
     setStatus('ready')
     setSelected(null)
     setAckIrreversible(false)
+    setResolveState({ status: 'idle', targetResource: null, message: null })
+
+    const provider = (alert.cloud_provider || '').toLowerCase()
+    if (!PROVIDERS_REQUIRING_RESOLUTION.has(provider)) return
+
+    let cancelled = false
+    setResolveState({ status: 'resolving', targetResource: null, message: null })
+
+    // Fetch the full alert rather than trusting the `alert` prop, since
+    // list-view callers (AlertPanel) may hand over a row object from a
+    // slimmer response shape. raw_evidence/source_node_id/target_node_id
+    // are needed here regardless of what the caller already had.
+    fetchAlert(alert.id)
+      .then((full) => {
+        if (cancelled) return null
+
+        if (provider === 'gcp') {
+          if (!full.source_node_id || !full.target_node_id) {
+            setResolveState({
+              status: 'unsupported',
+              targetResource: null,
+              message: 'This alert is missing the identity/service-account data needed to resolve the IAM binding.',
+            })
+            return null
+          }
+          return resolveGcpBinding(full.source_node_id, full.target_node_id)
+        }
+
+        // k8s: only k8s_escalation_primitive findings resolve to a single
+        // RoleBinding/ClusterRoleBinding. privilege_escalation/role_chaining
+        // findings on k8s are multi-hop chains with no single binding to
+        // remove - offering REMOVE_ROLE_BINDING for those would always fail
+        // on execute (see Week 8 punch list).
+        if (full.alert_type !== 'K8S_ESCALATION_PRIMITIVE') {
+          setResolveState({
+            status: 'unsupported',
+            targetResource: null,
+            message: 'This finding spans a multi-hop chain with no single role binding to remove. Contain the source identity through another workflow, or resolve it manually in the cluster.',
+          })
+          return null
+        }
+
+        const viaRole = full.raw_evidence?.metadata?.via_role
+        if (!full.source_node_id || !viaRole) {
+          setResolveState({
+            status: 'unsupported',
+            targetResource: null,
+            message: 'This alert is missing the role-binding data needed to resolve a containment target.',
+          })
+          return null
+        }
+        return resolveK8sBinding(full.source_node_id, viaRole)
+      })
+      .then((result) => {
+        if (cancelled || !result) return
+        setResolveState({ status: 'resolved', targetResource: result.target_resource, message: null })
+      })
+      .catch((err) => {
+        if (cancelled) return
+        setResolveState({
+          status: 'error',
+          targetResource: null,
+          message: err.message || 'Failed to resolve a containment target for this alert.',
+        })
+      })
+
+    return () => {
+      cancelled = true
+    }
   }, [alert])
 
   if (!alert) return null
 
   const provider = (alert.cloud_provider || '').toLowerCase()
   const actions = CATALOG_BY_PROVIDER[provider] || []
+  const needsResolution = PROVIDERS_REQUIRING_RESOLUTION.has(provider)
 
   async function handleExecute() {
     setStatus('executing')
     try {
+      const targetResource = needsResolution ? resolveState.targetResource : alert.resource_id
       await triggerContainment(
         selected.type,
         alert.cloud_provider,
-        alert.resource_id,
+        targetResource,
         alert.id
       )
       setStatus('done')
@@ -115,6 +205,12 @@ export default function ContainmentModal({ alert, onClose, onExecuted }) {
       setStatus('exec_error')
     }
   }
+
+  const canShowActions =
+    !needsResolution || resolveState.status === 'resolved'
+  const isBlockedByResolution =
+    needsResolution && (resolveState.status === 'unsupported' || resolveState.status === 'error')
+  const isResolving = needsResolution && resolveState.status === 'resolving'
 
   return (
     <div
@@ -151,60 +247,92 @@ export default function ContainmentModal({ alert, onClose, onExecuted }) {
 
         {(status === 'ready' || status === 'confirming') && (
           <>
-            {actions.length === 0 && (
-              <div style={{ fontSize: 12.5, color: 'var(--text-muted)', marginBottom: 16 }}>
-                No containment actions are available for provider "{alert.cloud_provider || 'unknown'}".
+            {isResolving && (
+              <div className="empty-state" style={{ padding: '20px 0' }}>
+                <Loader2 size={20} style={{ animation: 'spin 1s linear infinite' }} />
+                <div className="empty-state-title">Resolving containment target…</div>
               </div>
             )}
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
-              {actions.map((action) => (
-                <label
-                  key={action.type}
-                  style={{
-                    display: 'flex',
-                    gap: 10,
-                    padding: '10px 12px',
-                    borderRadius: 'var(--radius-md)',
-                    border: `1px solid ${selected?.type === action.type ? 'var(--accent-trust)' : 'var(--border)'}`,
-                    background: selected?.type === action.type ? 'var(--bg-hover)' : 'var(--bg-elevated)',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <input
-                    type="radio"
-                    name="containment-action"
-                    checked={selected?.type === action.type}
-                    onChange={() => setSelected(action)}
-                    style={{ marginTop: 3 }}
-                  />
-                  <div>
-                    <div style={{ fontSize: 13.5, fontWeight: 500 }}>{action.label}</div>
-                    <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>{action.description}</div>
-                    <div style={{ fontSize: 11, color: action.reversible ? 'var(--risk-low)' : 'var(--risk-critical)', marginTop: 4 }}>
-                      {action.reversible ? 'Reversible' : 'Not reversible'}
-                    </div>
-                  </div>
-                </label>
-              ))}
-            </div>
+            {isBlockedByResolution && (
+              <div
+                style={{
+                  display: 'flex',
+                  gap: 10,
+                  padding: '10px 12px',
+                  borderRadius: 'var(--radius-md)',
+                  border: '1px solid var(--border)',
+                  background: 'var(--bg-elevated)',
+                  fontSize: 12.5,
+                  color: 'var(--text-muted)',
+                  marginBottom: 16,
+                }}
+              >
+                <Info size={15} style={{ flexShrink: 0, marginTop: 1 }} />
+                <div>{resolveState.message}</div>
+              </div>
+            )}
 
-            {selected && !selected.reversible && (
-              <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 12.5, color: 'var(--text-muted)', marginBottom: 14 }}>
-                <input type="checkbox" checked={ackIrreversible} onChange={(e) => setAckIrreversible(e.target.checked)} style={{ marginTop: 2 }} />
-                I understand this action cannot be automatically rolled back.
-              </label>
+            {canShowActions && (
+              <>
+                {actions.length === 0 && (
+                  <div style={{ fontSize: 12.5, color: 'var(--text-muted)', marginBottom: 16 }}>
+                    No containment actions are available for provider "{alert.cloud_provider || 'unknown'}".
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+                  {actions.map((action) => (
+                    <label
+                      key={action.type}
+                      style={{
+                        display: 'flex',
+                        gap: 10,
+                        padding: '10px 12px',
+                        borderRadius: 'var(--radius-md)',
+                        border: `1px solid ${selected?.type === action.type ? 'var(--accent-trust)' : 'var(--border)'}`,
+                        background: selected?.type === action.type ? 'var(--bg-hover)' : 'var(--bg-elevated)',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      <input
+                        type="radio"
+                        name="containment-action"
+                        checked={selected?.type === action.type}
+                        onChange={() => setSelected(action)}
+                        style={{ marginTop: 3 }}
+                      />
+                      <div>
+                        <div style={{ fontSize: 13.5, fontWeight: 500 }}>{action.label}</div>
+                        <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>{action.description}</div>
+                        <div style={{ fontSize: 11, color: action.reversible ? 'var(--risk-low)' : 'var(--risk-critical)', marginTop: 4 }}>
+                          {action.reversible ? 'Reversible' : 'Not reversible'}
+                        </div>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+
+                {selected && !selected.reversible && (
+                  <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 12.5, color: 'var(--text-muted)', marginBottom: 14 }}>
+                    <input type="checkbox" checked={ackIrreversible} onChange={(e) => setAckIrreversible(e.target.checked)} style={{ marginTop: 2 }} />
+                    I understand this action cannot be automatically rolled back.
+                  </label>
+                )}
+              </>
             )}
 
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
               <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
-              <button
-                className="btn btn-danger"
-                disabled={!selected || (!selected.reversible && !ackIrreversible)}
-                onClick={handleExecute}
-              >
-                Execute action
-              </button>
+              {canShowActions && (
+                <button
+                  className="btn btn-danger"
+                  disabled={!selected || (!selected.reversible && !ackIrreversible)}
+                  onClick={handleExecute}
+                >
+                  Execute action
+                </button>
+              )}
             </div>
           </>
         )}

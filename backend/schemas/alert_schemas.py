@@ -35,6 +35,7 @@ class AlertResponse(BaseModel):
     risk_score: float = 0.0
     confidence: float = 0.0
     detection_source: Optional[str] = None
+    raw_evidence: Optional[dict] = None
 
     # Graph context
     source_node_id: Optional[str] = None

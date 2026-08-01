@@ -3,12 +3,14 @@ TrustField - Containment Routes
 Triggers and manages automated containment actions across cloud providers.
 """
 
+import os
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime
 import json
 import logging
+import ast
 
 from db.database import get_db, SessionLocal
 from db.models import ContainmentAction, ContainmentStatus, Alert, User, UserRole
@@ -16,6 +18,7 @@ from auth.dependencies import get_current_user, require_role
 from containment.aws_response import AWSContainmentEngine
 from containment.azure_response import AzureContainmentEngine
 from containment.k8s_response import K8sContainmentEngine
+from containment.gcp_response import GCPContainmentEngine
 from containment.playbooks import PlaybookEngine
 from containment.notifier import AlertNotifier
 from config import settings
@@ -33,6 +36,9 @@ router = APIRouter(prefix="/containment", tags=["Containment"])
 # Engine singletons (injected via DI in production)
 aws_engine = AWSContainmentEngine(role_arn=settings.AWS_CONTAINMENT_ROLE_ARN)
 azure_engine = AzureContainmentEngine()
+if settings.GOOGLE_APPLICATION_CREDENTIALS:
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = settings.GOOGLE_APPLICATION_CREDENTIALS
+gcp_engine = GCPContainmentEngine(project_id=settings.GCP_PROJECT_ID)
 k8s_engine = K8sContainmentEngine(
     kubeconfig_path=settings.K8S_KUBECONFIG_PATH,
     context=settings.K8S_CONTEXT,
@@ -84,6 +90,8 @@ async def _execute_containment(
             result = await azure_engine.execute(request.action_type, request.target_resource)
         elif provider == "k8s":
             result = await k8s_engine.execute(request.action_type, request.target_resource)
+        elif provider == "gcp":
+            result = await gcp_engine.execute(request.action_type, request.target_resource)
         else:
             raise ValueError(f"Unsupported cloud provider: {provider}")
 
@@ -150,6 +158,56 @@ async def resolve_k8s_binding(
 
     return {"target_resource": target_resource}
 
+
+@router.get("/resolve/gcp-binding")
+async def resolve_gcp_binding(
+    identity_id: str,
+    target_sa_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Resolve an identity + impersonated service account into the actual
+    IAM binding (role + member) that grants the impersonation access, so
+    it can be passed as target_resource to REMOVE_IAM_BINDING.
+
+    Reads the CAN_ASSUME edge's condition.via role and principal field
+    (set by GCPCollector._build_trust_relationships) to reconstruct the
+    exact role+member pair GCP's IAM policy holds - that's the specific
+    grant that needs revoking, not any other role the identity holds.
+    """
+    records = await neo4j_client.run_query(
+        """
+        MATCH (i:Identity {id: $identity_id})-[c:CAN_ASSUME]->(sa {id: $target_sa_id})
+        RETURN c.condition AS condition, c.principal AS principal
+        LIMIT 1
+        """,
+        {"identity_id": identity_id, "target_sa_id": target_sa_id},
+    )
+    if not records:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No CAN_ASSUME edge found between '{identity_id}' and '{target_sa_id}'",
+        )
+    rec = records[0]
+    condition_raw = rec.get("condition")
+    condition = {}
+    if condition_raw:
+        try:
+            condition = ast.literal_eval(condition_raw) if isinstance(condition_raw, str) else condition_raw
+        except (ValueError, SyntaxError):
+            condition = {}
+    role = condition.get("via")
+    member = rec.get("principal")
+    if not role or not member:
+        raise HTTPException(
+            status_code=422,
+            detail="CAN_ASSUME edge is missing role/member data required to resolve the binding",
+        )
+
+    target_resource = f"gcp:sa-binding:{target_sa_id}|{role}|{member}"
+    return {"target_resource": target_resource}
+
+
 @router.post("/trigger", response_model=ContainmentResponse, status_code=status.HTTP_202_ACCEPTED)
 async def trigger_containment(
     request: ContainmentRequest,
@@ -167,6 +225,8 @@ async def trigger_containment(
     - ISOLATE_RESOURCE
     - BLOCK_IP
     - ROTATE_KEYS
+    - REMOVE_ROLE_BINDING (k8s)
+    - REMOVE_IAM_BINDING (gcp)
     """
     # Validate the alert exists if provided
     if request.alert_id:
