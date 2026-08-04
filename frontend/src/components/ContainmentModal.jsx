@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { X, ShieldOff, AlertTriangle, CheckCircle2, Loader2, Info } from 'lucide-react'
 import { triggerContainment, fetchAlert, resolveK8sBinding, resolveGcpBinding, fetchContainmentAction } from '../services/api'
 
@@ -123,7 +123,11 @@ export default function ContainmentModal({ alert, onClose, onExecuted }) {
 
   // resolveState.status: 'idle' | 'resolving' | 'resolved' | 'unsupported' | 'error'
   const [resolveState, setResolveState] = useState({ status: 'idle', targetResource: null, message: null })
+  const activeAlertIdRef = useRef(null)
 
+  useEffect(() => {
+  activeAlertIdRef.current = alert ? alert.id : null
+  }, [alert])
   useEffect(() => {
     if (!alert) return
     setStatus('ready')
@@ -208,6 +212,7 @@ export default function ContainmentModal({ alert, onClose, onExecuted }) {
   const needsResolution = PROVIDERS_REQUIRING_RESOLUTION.has(provider)
 
   async function handleExecute() {
+    const executingAlertId = alert.id
     setStatus('executing')
     setExecError(null)
     try {
@@ -219,6 +224,11 @@ export default function ContainmentModal({ alert, onClose, onExecuted }) {
         alert.id
       )
       const finalAction = await pollContainmentAction(action_id)
+      // The modal may have been closed or switched to a different alert
+      // while this poll was in flight (no AbortController on the
+      // underlying fetch, so the request itself isn't cancelled - this
+      // just stops a stale response from overwriting a since-reset state).
+      if (activeAlertIdRef.current !== executingAlertId) return
       if (finalAction.status === 'failed') {
         setExecError(finalAction.error_message || 'The action failed. Check backend logs for details.')
         setStatus('exec_error')
@@ -227,11 +237,11 @@ export default function ContainmentModal({ alert, onClose, onExecuted }) {
       setStatus('done')
       onExecuted && onExecuted()
     } catch (err) {
+      if (activeAlertIdRef.current !== executingAlertId) return
       setExecError(err.message || null)
       setStatus('exec_error')
     }
   }
-
   const canShowActions =
     !needsResolution || resolveState.status === 'resolved'
   const isBlockedByResolution =
