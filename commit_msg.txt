@@ -1,0 +1,41 @@
+Fix Azure role_chaining: managed identity wildcard matching + node label merge bug
+
+Three bugs found and fixed while getting Azure identity-impersonation
+chaining (punch-list item 2) working end-to-end:
+
+1. MANAGED_IDENTITY_ASSIGN_ACTION was missing a path segment. Azure's
+   built-in "Managed Identity Operator" role grants the literal action
+   "Microsoft.ManagedIdentity/userAssignedIdentities/*/assign/action" —
+   the "*" is a fixed part of Azure's canonical RBAC operation naming,
+   not a wildcard to strip. Corrected the constant and switched from
+   exact-set-intersection to fnmatch-based matching
+   (_grants_managed_identity_assign) so broader grants (e.g. a
+   role scoped via "userAssignedIdentities/*" or bare "*") still match
+   correctly. Flagging as a systemic pattern to audit elsewhere in
+   azure_collector.py (_role_grants_self_escalation,
+   DANGEROUS_AZURE_ACTIONS, SELF_ESCALATION_ONLY_ACTIONS all use the
+   same actions & CONSTANT_SET exact-match style).
+
+2. neo4j_client.py upsert_node() was MERGE-ing on the full label set
+   instead of a single primary label + id. When the same node id
+   (trustfield-chain-identity's principalId) was ingested under two
+   different label combinations across collector passes
+   (AzureServicePrincipal, then AzureManagedIdentity), Neo4j created a
+   second node and collided with the Identity.id uniqueness constraint.
+   Fixed by MERGE-ing on (primary_label, id) only, then SET-ing any
+   additional labels on the existing node. General fix, not
+   managed-identity-specific — could have silently affected any node id
+   shared across label types.
+
+3. Scope string casing mismatch between _collect_role_assignments
+   (lowercase "resourcegroups") and _collect_managed_identities' ARM
+   resource listing (capital "resourceGroups") caused the
+   managed_identity_by_resource lookup in _build_trust_relationships to
+   silently miss. Fixed by lowercasing both the dict keys and the
+   lookup key.
+
+Live-verified: fresh scan produces the expected CAN_ASSUME edge
+trustfield-victim-azure -> trustfield-chain-identity, plus 3 correct
+role_chaining alerts for the 2-hop path to Owner/Contributor/User
+Access Administrator (MITRE T1548.005). Also removed temporary DEBUG
+logging added during root-causing.

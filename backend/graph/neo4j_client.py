@@ -98,11 +98,20 @@ class Neo4jClient:
     async def upsert_node(self, node_id: str, labels: List[str], properties: Dict) -> None:
         """
         Create or update a graph node.
-        Uses MERGE on node id to avoid duplicates.
+        Uses MERGE on node id + primary label only (not the full label set),
+        since MERGE matches on the whole pattern including labels. Merging
+        on the full label set means the same id ingested under a different
+        label combination (e.g. a managed identity that's also a service
+        principal) creates a second node and collides with the id uniqueness
+        constraint instead of updating the existing one. Additional labels
+        are added via SET so they accumulate on the same node over repeated
+        ingests instead of being overwritten or causing a mismatch.
         """
-        label_str = ":".join(labels)
+        primary_label = labels[0]
+        extra_label_stmts = "\n".join(f"SET n:{lbl}" for lbl in labels[1:])
         query = f"""
-        MERGE (n:{label_str} {{id: $id}})
+        MERGE (n:{primary_label} {{id: $id}})
+        {extra_label_stmts}
         SET n += $properties
         SET n.updated_at = datetime()
         """

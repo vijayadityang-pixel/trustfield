@@ -170,6 +170,116 @@ class TrustGraphBuilder:
             await self.neo4j.upsert_node(node_id, ["Identity", "AzureRoleDefinition"], props)
             nodes_created += 1
 
+    # ─── Azure ────────────────────────────────────────────────────────────────
+
+    async def _ingest_azure(self, data: Any) -> Dict:
+        """Ingest Azure IAM data into the trust graph."""
+        nodes_created = 0
+        edges_created = 0
+
+        # Role definitions first, so we can look up privilege_level while
+        # scoring users/service principals below. Unlike GCP, Azure's
+        # collector already computes privilege_level per role definition
+        # (via _role_definition_privilege), so no heuristic needed here.
+        role_privilege_map: Dict[str, int] = {
+            rd.get("id"): rd.get("privilege_level", 1)
+            for rd in data.role_definitions
+            if rd.get("id")
+        }
+
+        # Derive each principal's privilege_level from the highest-privilege
+        # role it actually holds, so CAN_ASSUME targets carry real privilege
+        # for the privilege_escalation / role_chaining detectors.
+        principal_max_privilege: Dict[str, int] = {}
+        for t in data.trust_relationships:
+            if t.get("relationship") != "HAS_ROLE":
+                continue
+            source = t.get("source", "")
+            target = t.get("target", "")
+            role_priv = role_privilege_map.get(target, 1)
+            principal_max_privilege[source] = max(principal_max_privilege.get(source, 1), role_priv)
+
+        # Users — id is raw AAD object id, matching principal_id used in edges
+        for user in data.users:
+            node_id = user.get("id") or f"azure:user:{user.get('userPrincipalName')}"
+            props = {
+                "id": node_id,
+                "name": user.get("displayName", ""),
+                "upn": user.get("userPrincipalName", ""),
+                "provider": "azure",
+                "node_type": "azure_user",
+                "subscription_id": data.subscription_id,
+                "tenant_id": data.tenant_id,
+                "is_active": user.get("accountEnabled", True),
+                "privilege_level": principal_max_privilege.get(node_id, 1),
+            }
+            props["risk_score"] = risk_scorer.score_node(props)
+            await self.neo4j.upsert_node(node_id, ["Identity", "AzureUser"], props)
+            nodes_created += 1
+
+        # Service principals — same raw-id rule
+        for sp in data.service_principals:
+            node_id = sp.get("id") or f"azure:sp:{sp.get('appId', 'unknown')}"
+            props = {
+                "id": node_id,
+                "name": sp.get("displayName", ""),
+                "app_id": sp.get("appId", ""),
+                "provider": "azure",
+                "node_type": "azure_service_principal",
+                "subscription_id": data.subscription_id,
+                "tenant_id": data.tenant_id,
+                "is_active": sp.get("accountEnabled", True),
+                "privilege_level": principal_max_privilege.get(node_id, 1),
+            }
+            props["risk_score"] = risk_scorer.score_node(props)
+            await self.neo4j.upsert_node(node_id, ["Identity", "AzureServicePrincipal"], props)
+            nodes_created += 1
+
+        # Role definitions — MUST be their own Identity nodes so HAS_ROLE
+        # targets are traversable by the generic privilege_escalation query.
+        # Reuses privilege_level already computed by the collector.
+        for role_def in data.role_definitions:
+            node_id = role_def.get("id")
+            if not node_id:
+                continue
+            props = {
+                "id": node_id,
+                "name": role_def.get("name", ""),
+                "provider": "azure",
+                "node_type": "azure_role_definition",
+                "subscription_id": data.subscription_id,
+                "role_type": role_def.get("role_type", ""),
+                "privilege_level": role_def.get("privilege_level", 1),
+                "grants_self_escalation": role_def.get("grants_self_escalation", False),
+            }
+            props["risk_score"] = risk_scorer.score_node(props)
+            await self.neo4j.upsert_node(node_id, ["Identity", "AzureRoleDefinition"], props)
+            nodes_created += 1
+        # Managed identities — same raw-principal-id rule as users/service
+        # principals. Without this loop, CAN_ASSUME edges targeting a
+        # managed identity's principal_id would MERGE an orphan, unlabeled
+        # node via upsert_edge - same bug class as the GCP/Azure orphan-node
+        # issues already fixed elsewhere (id used for edges must match the
+        # id used for node creation).
+        for mi in data.managed_identities:
+            node_id = mi.get("principal_id")
+            if not node_id:
+                continue
+            props = {
+                "id": node_id,
+                "name": mi.get("name", ""),
+                "resource_id": mi.get("resource_id", ""),
+                "client_id": mi.get("client_id", ""),
+                "provider": "azure",
+                "node_type": "azure_managed_identity",
+                "subscription_id": data.subscription_id,
+                "tenant_id": data.tenant_id,
+                "privilege_level": principal_max_privilege.get(node_id, 1),
+            }
+            props["risk_score"] = risk_scorer.score_node(props)
+            await self.neo4j.upsert_node(node_id, ["Identity", "AzureManagedIdentity"], props)
+            nodes_created += 1
+
         # Edges: HAS_ROLE (assignments) + CAN_ASSUME (real self-escalation)
         for trust in data.trust_relationships:
             source = trust.get("source", "")

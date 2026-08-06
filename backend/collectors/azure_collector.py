@@ -2,7 +2,7 @@
 TrustField - Azure IAM Collector
 Collects Azure AD users, service principals, role assignments, and trust data.
 """
-
+import fnmatch
 import asyncio
 import logging
 from typing import Any, Dict, List, Optional
@@ -14,6 +14,7 @@ from azure.mgmt.subscription import SubscriptionClient
 from msgraph import GraphServiceClient
 from msgraph.generated.users.users_request_builder import UsersRequestBuilder
 from msgraph.generated.service_principals.service_principals_request_builder import ServicePrincipalsRequestBuilder
+from rich import scope
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,24 @@ DANGEROUS_AZURE_ACTIONS = {
     "Microsoft.Authorization/*",
     "*",
 }
+# Actions that let a principal "operate as" a different identity by
+# assigning a user-assigned managed identity to a resource they control
+# (e.g. attach it to a VM/Function they can run code on). This is Azure's
+# structural equivalent of AWS's sts:AssumeRole chaining: the assigning
+# principal doesn't gain the target identity's roles directly via
+# HAS_ROLE - they gain the ability to *act as* that identity, which then
+# has its own independent CAN_ASSUME/HAS_ROLE edges. Modeled as a
+# principal -> managed-identity CAN_ASSUME edge; role_chaining's existing
+# depth 2..4 pattern picks up the second hop for free once the managed
+# identity's own role assignments are ingested normally.
 
+
+MANAGED_IDENTITY_ASSIGN_ACTION = "Microsoft.ManagedIdentity/userAssignedIdentities/*/assign/action"
+def _grants_managed_identity_assign(actions: set[str]) -> bool:
+    return any(
+        fnmatch.fnmatch(MANAGED_IDENTITY_ASSIGN_ACTION, action) or action == "*"
+        for action in actions
+    )
 BUILTIN_HIGH_PRIVILEGE_ROLES = {"Owner", "Contributor", "User Access Administrator"}
 
 # Actions that represent PURE self-escalation capability with no direct
@@ -199,35 +217,73 @@ class AzureCollector:
         return assignments
 
     def _collect_role_definitions(self, subscription_id: str) -> List[Dict]:
-        """Enumerate built-in and custom role definitions."""
-        auth_client = self._get_auth_client()
-        definitions = []
-        try:
-            scope = f"/subscriptions/{subscription_id}"
-            for role_def in auth_client.role_definitions.list(scope):
-                role_dict = {
-                    "id": role_def.id,
-                    "name": role_def.role_name,
-                    "description": role_def.description,
-                    "role_type": role_def.role_type,
-                    "permissions": [
-                        {
-                            "actions": p.actions,
-                            "not_actions": p.not_actions,
-                            "data_actions": p.data_actions,
-                        }
-                        for p in (role_def.permissions or [])
-                    ],
-                    "node_type": "azure_role_definition",
-                    "provider": "azure",
-                }
-                role_dict["privilege_level"] = self._role_definition_privilege(role_dict)
-                role_dict["grants_self_escalation"] = self._role_grants_self_escalation(role_dict)
-                definitions.append(role_dict)
-        except Exception as exc:
-            logger.warning(f"Role definition collection failed: {exc}")
-        return definitions
+            """Enumerate built-in and custom role definitions."""
+            auth_client = self._get_auth_client()
+            definitions = []
+            try:
+                scope = f"/subscriptions/{subscription_id}"
+                for role_def in auth_client.role_definitions.list(scope):
+                    role_dict = {
+                        "id": role_def.id,
+                        "name": role_def.role_name,
+                        "description": role_def.description,
+                        "role_type": role_def.role_type,
+                        "permissions": [
+                            {
+                                "actions": p.actions,
+                                "not_actions": p.not_actions,
+                                "data_actions": p.data_actions,
+                            }
+                            for p in (role_def.permissions or [])
+                        ],
+                        "node_type": "azure_role_definition",
+                        "provider": "azure",
+                    }
+                    role_dict["privilege_level"] = self._role_definition_privilege(role_dict)
+                    role_dict["grants_self_escalation"] = self._role_grants_self_escalation(role_dict)
+                    definitions.append(role_dict)
+            except Exception as exc:
+                logger.warning(f"Role definition collection failed: {exc}")
+            return definitions
     
+    def _collect_managed_identities(self, subscription_id: str) -> List[Dict]:
+        """
+        Enumerate user-assigned managed identities in the subscription.
+        Needed to resolve MANAGED_IDENTITY_ASSIGN_ACTIONS targets to a real
+        principal_id (AAD object ID) that can serve as a CAN_ASSUME edge
+        target/source in the graph, distinct from the identity's ARM
+        resource ID.
+        """
+        from azure.mgmt.resource import ResourceManagementClient
+    
+        resource_client = ResourceManagementClient(self._get_credential(), subscription_id)
+        identities = []
+        try:
+            resources = resource_client.resources.list(
+                filter="resourceType eq 'Microsoft.ManagedIdentity/userAssignedIdentities'"
+            )
+            for res in resources:
+                # Generic resource listing doesn't include the principalId;
+                # a follow-up get_by_id with the correct api-version is
+                # required to read .properties.principalId.
+                full = resource_client.resources.get_by_id(res.id, api_version="2023-01-31")
+                props = full.properties or {}
+                principal_id = props.get("principalId")
+                if not principal_id:
+                    logger.warning(f"Managed identity {res.id} missing principalId, skipping")
+                    continue
+                identities.append({
+                    "resource_id": res.id,
+                    "principal_id": principal_id,
+                    "client_id": props.get("clientId"),
+                    "name": res.name,
+                    "node_type": "azure_managed_identity",
+                    "provider": "azure",
+                })
+        except Exception as exc:
+            logger.warning(f"Managed identity collection failed: {exc}")
+        return identities
+
     def _role_definition_privilege(self, role_def: Dict) -> int:
         """
         Score a role definition 1-5 based on how much access it grants.
@@ -267,18 +323,38 @@ class AzureCollector:
         self,
         role_assignments: List[Dict],
         role_definitions: List[Dict],
+        managed_identities: List[Dict],
     ) -> List[Dict]:
         """
         Build both HAS_ROLE edges (permission bundles) and, where a role
         grants roleAssignments/write, real CAN_ASSUME self-escalation edges
         so the existing role_chaining / wildcard_trust / cross_account
         detectors (which are hardcoded to CAN_ASSUME) can fire on Azure data.
+
+        Also builds identity -> managed-identity CAN_ASSUME edges where a
+        principal holds MANAGED_IDENTITY_ASSIGN_ACTIONS scoped at (or above)
+        a specific managed identity resource - Azure's structural equivalent
+        of AWS sts:AssumeRole chaining. The managed identity's own HAS_ROLE/
+        CAN_ASSUME edges (built normally, since it's just another principal
+        in role_assignments) supply the second hop, so role_chaining's
+        existing depth 2..4 Cypher pattern picks this up with no detector
+        changes required.
         """
         role_def_map = {rd["id"]: rd for rd in role_definitions}
         high_priv_role_ids = [
             rd["id"] for rd in role_definitions
             if self._role_definition_privilege(rd) >= 4
         ]
+        # resource_id here is the ARM path (e.g. .../userAssignedIdentities/foo),
+        # which is what a role assignment's scope points at - distinct from
+        # principal_id, the AAD object ID edges need to reference.
+        # Keyed lowercase because Azure's role-assignment scope strings and
+        # ARM resource IDs don't share consistent casing on path segments
+        # (e.g. "resourcegroups" vs "resourceGroups") even for the same
+        # resource - confirmed via live data during Week 8 chaining work.
+        managed_identity_by_resource = {
+            mi["resource_id"].lower(): mi for mi in managed_identities
+        }
 
         edges = []
         for assignment in role_assignments:
@@ -311,8 +387,28 @@ class AzureCollector:
                         "condition": {"via": "roleAssignments/write", "scope": scope, "broad_scope": is_broad_scope},
                         "is_cross_account": False,
                     })
-        return edges
 
+            # Identity chaining: this assignment's scope is exactly a
+            # managed identity resource, and the role held there grants
+            # the assign/action permission - the assigning principal can
+            # operate as that managed identity.
+            managed_identity = managed_identity_by_resource.get(scope.lower())
+            if managed_identity:
+                actions = set()
+                for perm in role_def.get("permissions", []):
+                    actions.update(perm.get("actions") or [])
+                grants_identity_chain = _grants_managed_identity_assign(actions)
+                if grants_identity_chain:
+                    edges.append({
+                        "source": assignment["principal_id"],
+                        "target": managed_identity["principal_id"],
+                        "relationship": "CAN_ASSUME",
+                        "principal": assignment["principal_id"],
+                        "condition": {"via": "userAssignedIdentities/assign/action", "scope": scope},
+                        "is_cross_account": False,
+                    })           
+        return edges
+            
     async def collect(self) -> AzureIAMData:
         """Main entry point: collect all Azure IAM data asynchronously."""
         loop = asyncio.get_event_loop()
@@ -343,8 +439,13 @@ class AzureCollector:
             )
             logger.info(f"Collected {len(data.role_definitions)} role definitions")
 
+            data.managed_identities = await loop.run_in_executor(
+                None, self._collect_managed_identities, data.subscription_id
+            )
+            logger.info(f"Collected {len(data.managed_identities)} managed identities")
+
             data.trust_relationships = self._build_trust_relationships(
-                data.role_assignments, data.role_definitions
+                data.role_assignments, data.role_definitions, data.managed_identities
             )
             logger.info(f"Extracted {len(data.trust_relationships)} trust relationships")
 
