@@ -15,9 +15,10 @@ from db.models import ScanStatus
 class ScanRequest(BaseModel):
     """Body for POST /scan/ — all fields optional."""
 
+    model_config = ConfigDict(extra="forbid")
+
     providers: Optional[List[str]] = None   # ["aws", "azure", "gcp", "k8s"] or subset
     reason: Optional[str] = None            # Free-text reason for the scan
-
 
 # ─── Response (lightweight — returned immediately on trigger) ─────────────────
 
