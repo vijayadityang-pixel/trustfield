@@ -64,6 +64,7 @@ WHERE target.privilege_level >= 4
   AND ($cloud_provider IS NULL OR source.provider = $cloud_provider)
 WITH source, target,
      [n IN nodes(path) | n.id] AS chain,
+     [r IN relationships(path) | type(r)] AS rel_types,
      length(path) AS depth
 RETURN
     source.id AS source_id,
@@ -71,6 +72,7 @@ RETURN
     source.provider AS provider,
     target.privilege_level AS privilege_level,
     chain,
+    rel_types,
     depth
 ORDER BY depth
 LIMIT $limit
