@@ -35,6 +35,25 @@ Isolation Forest training data.
 
 ## Resolved this session (2026-08-06 to 2026-08-08)
 
+### `job_id` / `id` field naming drift
+**Status:** resolved
+**Verified:** live — `POST /scan/` and `GET /scan/{job_id}` both returned
+`job_id` for the same scan (`9f1d063a-092b-4b1a-8520-a87c0fb677d9`)
+`ScanJobResponse` (returned by `POST /scan/`) and `ScanResultSummary`
+(returned by `GET /scan/{job_id}/results`) both used `job_id`, but
+`ScanJobDetail` (returned by `GET /scan/{job_id}`, `GET /scan/latest`,
+and `GET /scan/`) used `id` directly from the ORM column via
+`from_attributes=True` — so the same scan job's identifier appeared
+under two different field names depending on which endpoint was hit.
+Same field-naming-drift bug class as the Week 2–3 Cypher/Pydantic
+issues and the `cloud_provider` filter bug, this time at the
+response-schema-vs-ORM-column layer. Fixed by changing the field to
+`job_id: str = Field(validation_alias="id")` in `ScanJobDetail`,
+keeping the DB column named `id` untouched while aliasing it for a
+consistent API surface.
+
+Commit: `c2b9ee9`.
+
 ### Azure `role_chaining` / identity-chaining detection
 **Status:** resolved
 **Verified:** live scan, alerts 138/139/140, path
@@ -99,6 +118,27 @@ time. Fixed by adding `model_config = ConfigDict(extra="forbid")` to
 silently scanning everything.
 
 Commit: `bd7e292`.
+### `role_chaining` alerts had empty `path_edges`
+**Status:** resolved
+**Verified:** live scan, alerts 141/142/143 — `raw_evidence.path_edges`
+now `["CAN_ASSUME","CAN_ASSUME"]`, matching the two-hop `path_nodes`
+chain (stale alerts 138/139/140 deleted and regenerated fresh to see
+the fix, since `generate_alerts` dedup skips creation when an OPEN
+alert already exists for the same source/target pair)
+Root cause: `_record_to_path()` reads `path_edges` from
+`record.get("rel_types", [])`. `QUERY_PRIVILEGE_ESCALATION` explicitly
+computes and returns `rel_types`, but `QUERY_ROLE_CHAINING` never
+selected it at all — its `WITH` clause only carried `chain` and `depth`
+forward, dropping the `path` variable before any relationship-type
+extraction, so `rel_types` always fell back to the empty-list default.
+Same field-not-projected bug class as the rest of the project. Fixed
+by adding `[r IN relationships(path) | type(r)] AS rel_types` to both
+the `WITH` and `RETURN` clauses of `QUERY_ROLE_CHAINING`. No other
+code changes needed — `_record_to_path()` already read the field
+generically.
+
+Commit: `338f6d2`.
+
 
 ---
 
@@ -127,12 +167,11 @@ Limitations and Future Work" writeup rather than left as invisible gaps:
   clobbers demo state.
 - `clear_provider_data` wipes real demo data on every scan, including
   test runs.
-- `role_chaining` alerts' `path_edges` field is empty (`[]`) while
-  `privilege_escalation` alerts populate it (`["CAN_ASSUME"]`) —
-  observed 2026-08-08, not yet investigated. Possibly intentional given
-  multi-hop paths, possibly another schema-drift instance. Flagged, not
-  chased.
-- `job_id` vs `id` field naming inconsistency between `POST /scan/`'s
-  response and `GET /scan/{id}`'s response — same dominant bug class as
-  the Week 2–3 Cypher/Pydantic drift, just at the route-response level
-  this time. Observed 2026-08-08, not yet fixed.
+  
+---
+
+## Still-open loose threads (not yet started)
+
+- Audit other Pydantic request schemas (`schemas/*.py`) for the same
+  missing `extra="forbid"` gap that caused the `cloud_provider` filter
+  bug — only `ScanRequest` has been checked/fixed so far.
