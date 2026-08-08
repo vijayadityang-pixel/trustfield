@@ -14,39 +14,19 @@ from azure.mgmt.subscription import SubscriptionClient
 from msgraph import GraphServiceClient
 from msgraph.generated.users.users_request_builder import UsersRequestBuilder
 from msgraph.generated.service_principals.service_principals_request_builder import ServicePrincipalsRequestBuilder
-from rich import scope
 
 logger = logging.getLogger(__name__)
 
-# --- Add near the top, after ESCALATION_TYPE_DESCRIPTIONS-style constants would go ---
-
 # Actions that let a principal grant itself (or anyone) additional roles —
-# i.e. Azure's equivalent of an AWS wildcard trust policy.
+# i.e. Azure's equivalent of an AWS wildcard trust policy. Each entry is a
+# literal *target* capability to check coverage for, not a pattern to
+# exact-match against a role's actions — see _action_covered().
 DANGEROUS_AZURE_ACTIONS = {
     "Microsoft.Authorization/roleAssignments/write",
     "Microsoft.Authorization/*/write",
     "Microsoft.Authorization/*",
     "*",
 }
-# Actions that let a principal "operate as" a different identity by
-# assigning a user-assigned managed identity to a resource they control
-# (e.g. attach it to a VM/Function they can run code on). This is Azure's
-# structural equivalent of AWS's sts:AssumeRole chaining: the assigning
-# principal doesn't gain the target identity's roles directly via
-# HAS_ROLE - they gain the ability to *act as* that identity, which then
-# has its own independent CAN_ASSUME/HAS_ROLE edges. Modeled as a
-# principal -> managed-identity CAN_ASSUME edge; role_chaining's existing
-# depth 2..4 pattern picks up the second hop for free once the managed
-# identity's own role assignments are ingested normally.
-
-
-MANAGED_IDENTITY_ASSIGN_ACTION = "Microsoft.ManagedIdentity/userAssignedIdentities/*/assign/action"
-def _grants_managed_identity_assign(actions: set[str]) -> bool:
-    return any(
-        fnmatch.fnmatch(MANAGED_IDENTITY_ASSIGN_ACTION, action) or action == "*"
-        for action in actions
-    )
-BUILTIN_HIGH_PRIVILEGE_ROLES = {"Owner", "Contributor", "User Access Administrator"}
 
 # Actions that represent PURE self-escalation capability with no direct
 # resource access of their own. Excluded from _role_definition_privilege()'s
@@ -58,6 +38,50 @@ BUILTIN_HIGH_PRIVILEGE_ROLES = {"Owner", "Contributor", "User Access Administrat
 # (policy assignments, locks, deny assignments) beyond just self-escalation,
 # so those stay counted toward direct-access scoring.
 SELF_ESCALATION_ONLY_ACTIONS = {"Microsoft.Authorization/roleAssignments/write"}
+
+
+def _action_covered(target_action: str, granted_actions: set) -> bool:
+    """
+    True if any of the granted RBAC actions covers target_action.
+
+    Azure grants (not targets) are the side that legitimately contains
+    wildcards, including mid-path wildcards that are a fixed part of Azure's
+    canonical operation naming (e.g. the real "Managed Identity Operator"
+    role grants "Microsoft.ManagedIdentity/userAssignedIdentities/*/assign/action").
+    Exact-set-intersection between a granted-actions set and a target-actions
+    set silently misses these, since the wildcard segment never equals any
+    literal string. fnmatch fixes this as long as target is passed as the
+    "name" side and each granted action as the "pattern" side — reversing
+    the direction breaks matching for literal (non-wildcard) grants.
+    """
+    return any(fnmatch.fnmatch(target_action, granted) for granted in granted_actions)
+
+
+def _any_action_covered(target_actions: set, granted_actions: set) -> bool:
+    """True if any target action in target_actions is covered by any granted action."""
+    return any(_action_covered(target, granted_actions) for target in target_actions)
+
+
+# Actions that let a principal "operate as" a different identity by
+# assigning a user-assigned managed identity to a resource they control
+# (e.g. attach it to a VM/Function they can run code on). This is Azure's
+# structural equivalent of AWS's sts:AssumeRole chaining: the assigning
+# principal doesn't gain the target identity's roles directly via
+# HAS_ROLE - they gain the ability to *act as* that identity, which then
+# has its own independent CAN_ASSUME/HAS_ROLE edges. Modeled as a
+# principal -> managed-identity CAN_ASSUME edge; role_chaining's existing
+# depth 2..4 pattern picks up the second hop for free once the managed
+# identity's own role assignments are ingested normally.
+MANAGED_IDENTITY_ASSIGN_ACTION = "Microsoft.ManagedIdentity/userAssignedIdentities/*/assign/action"
+
+
+def _grants_managed_identity_assign(actions: set) -> bool:
+    return _action_covered(MANAGED_IDENTITY_ASSIGN_ACTION, actions)
+
+
+BUILTIN_HIGH_PRIVILEGE_ROLES = {"Owner", "Contributor", "User Access Administrator"}
+
+
 @dataclass
 class AzureIAMData:
     """Container for all collected Azure IAM data."""
@@ -138,7 +162,6 @@ class AzureCollector:
         try:
             graph = self._get_graph_client()
 
-            # Select only needed fields
             query_params = UsersRequestBuilder.UsersRequestBuilderGetQueryParameters(
                 select=["id", "displayName", "userPrincipalName", "accountEnabled"]
             )
@@ -245,7 +268,7 @@ class AzureCollector:
             except Exception as exc:
                 logger.warning(f"Role definition collection failed: {exc}")
             return definitions
-    
+
     def _collect_managed_identities(self, subscription_id: str) -> List[Dict]:
         """
         Enumerate user-assigned managed identities in the subscription.
@@ -255,7 +278,7 @@ class AzureCollector:
         resource ID.
         """
         from azure.mgmt.resource import ResourceManagementClient
-    
+
         resource_client = ResourceManagementClient(self._get_credential(), subscription_id)
         identities = []
         try:
@@ -263,9 +286,6 @@ class AzureCollector:
                 filter="resourceType eq 'Microsoft.ManagedIdentity/userAssignedIdentities'"
             )
             for res in resources:
-                # Generic resource listing doesn't include the principalId;
-                # a follow-up get_by_id with the correct api-version is
-                # required to read .properties.principalId.
                 full = resource_client.resources.get_by_id(res.id, api_version="2023-01-31")
                 props = full.properties or {}
                 principal_id = props.get("principalId")
@@ -299,14 +319,21 @@ class AzureCollector:
             actions.update(perm.get("actions") or [])
         if "*" in actions:
             return 5
-        # Exclude pure self-escalation actions before scoring direct access -
-        # see SELF_ESCALATION_ONLY_ACTIONS comment. Without this, a role
-        # granting ONLY roleAssignments/write scores 5 here, which then makes
-        # any principal holding it look already-maximally-privileged and
-        # disqualifies it as a QUERY_PRIVILEGE_ESCALATION source even though
-        # real CAN_ASSUME edges from it exist.
-        direct_access_actions = actions - SELF_ESCALATION_ONLY_ACTIONS
-        if any(a in DANGEROUS_AZURE_ACTIONS for a in direct_access_actions):
+        # Exclude granted actions that ONLY cover pure self-escalation
+        # capability (SELF_ESCALATION_ONLY_ACTIONS) before scoring direct
+        # access - see SELF_ESCALATION_ONLY_ACTIONS comment. Uses fnmatch
+        # coverage (_any_action_covered) rather than a literal set
+        # difference so wildcard grants that also only cover a
+        # self-escalation-only target (e.g. a role granting
+        # "Microsoft.Authorization/roleAssignments/*", narrower than the
+        # DANGEROUS_AZURE_ACTIONS namespace-wildcard entries) are excluded
+        # too, not just exact string matches like the literal
+        # "Microsoft.Authorization/roleAssignments/write".
+        direct_access_actions = {
+            a for a in actions
+            if not _any_action_covered(SELF_ESCALATION_ONLY_ACTIONS, {a})
+        }
+        if _any_action_covered(DANGEROUS_AZURE_ACTIONS, direct_access_actions):
             return 5
         if any(a.endswith("/write") or a.endswith("/*") for a in direct_access_actions):
             return 3
@@ -317,7 +344,7 @@ class AzureCollector:
         actions = set()
         for perm in role_def.get("permissions", []):
             actions.update(perm.get("actions") or [])
-        return bool(actions & DANGEROUS_AZURE_ACTIONS) or "*" in actions
+        return _any_action_covered(DANGEROUS_AZURE_ACTIONS, actions)
 
     def _build_trust_relationships(
         self,
@@ -345,13 +372,6 @@ class AzureCollector:
             rd["id"] for rd in role_definitions
             if self._role_definition_privilege(rd) >= 4
         ]
-        # resource_id here is the ARM path (e.g. .../userAssignedIdentities/foo),
-        # which is what a role assignment's scope points at - distinct from
-        # principal_id, the AAD object ID edges need to reference.
-        # Keyed lowercase because Azure's role-assignment scope strings and
-        # ARM resource IDs don't share consistent casing on path segments
-        # (e.g. "resourcegroups" vs "resourceGroups") even for the same
-        # resource - confirmed via live data during Week 8 chaining work.
         managed_identity_by_resource = {
             mi["resource_id"].lower(): mi for mi in managed_identities
         }
@@ -371,9 +391,6 @@ class AzureCollector:
                 "role_name": role_name,
             })
 
-            # Self-escalation: this principal can grant itself (or anyone)
-            # any role — model as CAN_ASSUME to every high-privilege role
-            # visible at this scope, same semantic as an AWS wildcard trust.
             if self._role_grants_self_escalation(role_def):
                 is_broad_scope = "/subscriptions/" in scope and scope.count("/") <= 2
                 for target_role_id in high_priv_role_ids:
@@ -388,10 +405,6 @@ class AzureCollector:
                         "is_cross_account": False,
                     })
 
-            # Identity chaining: this assignment's scope is exactly a
-            # managed identity resource, and the role held there grants
-            # the assign/action permission - the assigning principal can
-            # operate as that managed identity.
             managed_identity = managed_identity_by_resource.get(scope.lower())
             if managed_identity:
                 actions = set()
@@ -406,9 +419,9 @@ class AzureCollector:
                         "principal": assignment["principal_id"],
                         "condition": {"via": "userAssignedIdentities/assign/action", "scope": scope},
                         "is_cross_account": False,
-                    })           
+                    })
         return edges
-            
+
     async def collect(self) -> AzureIAMData:
         """Main entry point: collect all Azure IAM data asynchronously."""
         loop = asyncio.get_event_loop()
@@ -421,14 +434,12 @@ class AzureCollector:
             data.tenant_id = self.tenant_id or ""
             logger.info(f"Collecting Azure IAM for subscription {data.subscription_id}")
 
-            # Graph API calls are natively async with msgraph-sdk
             data.users = await self._collect_users_via_graph()
             logger.info(f"Collected {len(data.users)} Azure AD users")
 
             data.service_principals = await self._collect_service_principals()
             logger.info(f"Collected {len(data.service_principals)} service principals")
 
-            # ARM calls are synchronous — run in executor
             data.role_assignments = await loop.run_in_executor(
                 None, self._collect_role_assignments, data.subscription_id
             )
