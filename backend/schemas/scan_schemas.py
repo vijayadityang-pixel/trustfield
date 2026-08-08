@@ -5,7 +5,7 @@ Pydantic models for scan job API request/response serialization.
 
 from datetime import datetime
 from typing import List, Optional
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from db.models import ScanStatus
 
@@ -38,7 +38,7 @@ class ScanJobDetail(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
+    job_id: str = Field(validation_alias="id")
     status: ScanStatus
 
     providers_requested: Optional[List[str]] = None
