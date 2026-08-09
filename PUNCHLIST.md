@@ -10,22 +10,40 @@ Status values: `open`, `in progress`, `resolved`, `deferred (documented limitati
 
 ## Open
 
-### 1. Five-singleton Neo4j architecture
-**Status:** open
-No shared lifecycle management across the five places the codebase
-instantiates a Neo4j client/driver. Root cause (or contributing factor)
-behind at least two separate bugs hit this project:
-- `upsert_node()` MERGE-on-full-label-set duplicate-node bug (fixed
-  2026-08-06, but the underlying singleton sprawl that made it easy to
-  miss remains)
-- Neo4j driver binding to the wrong event loop across test isolation
-  boundaries (async fixture chaining issue)
-Needs a proper refactor to a single shared client with defined lifecycle,
-not a patch.
+*(none currently — five-singleton refactor and is_aws_managed both
+resolved this session; remaining work is the schema audit loose
+thread below and the Week 8 writeup/demo tasks)*
 
 ---
 
 ## Resolved this session (2026-08-09)
+
+### Five-singleton Neo4j architecture
+**Status:** resolved
+**Verified:** live — `GET /graph/stats`, `/scan/latest`, `/ml/anomalies`,
+and `/containment/actions` all returned `200` in the same running
+uvicorn process, with no restarts between calls, confirming all 5
+modules share one working connection
+All 5 backend modules (`main.py`, `routes_scan.py`, `routes_graph.py`,
+`routes_ml.py`, `routes_containment.py`) previously instantiated their
+own `Neo4jClient()` at module level, with only `main.py`'s instance
+having a managed `connect()`/`close()` lifecycle via `lifespan()`. The
+other 4 relied on lazy `.connect()` bootstrapping inside `session()`
+and were never explicitly closed. Fixed by adding
+`graph/neo4j_singleton.py` holding one shared instance; all 5 files
+now import it instead of constructing their own. `main.py`'s
+`lifespan()` still owns `connect()`/`close()`/`apply_indexes()` for
+the single shared instance; route modules only read from it. No route
+handler signatures or logic changed — diff limited to swapping the
+import line and removing the now-redundant local instantiation in
+each file.
+
+Root cause (or contributing factor) behind: the `upsert_node()`
+MERGE-on-full-label-set duplicate-node bug's wider blast radius, the
+"Unable to retrieve routing information after restart" bug, and
+async-fixture test-isolation crashes.
+
+Commit: `f104eac`.
 
 ### `is_aws_managed` ML feature
 **Status:** resolved
@@ -171,6 +189,25 @@ generically.
 
 Commit: `338f6d2`.
 
+### `extra="forbid"` schema audit
+**Status:** resolved
+**Verified:** live — `POST /containment/trigger` with a deliberately
+misspelled field (`alertId` instead of `alert_id`) returned `422
+extra_forbidden`, confirming the guard actually rejects bad fields
+rather than silently dropping them
+Audited all 5 files in `schemas/` for the same gap that caused the
+`cloud_provider`/`ScanRequest` bug (`bd7e292`) — that fix only covered
+`ScanRequest` itself. Added `ConfigDict(extra="forbid")` to the 3
+other real request-body models: `AlertUpdate` (`alert_schemas.py`,
+PATCH `/alerts/{id}` body), `LoginRequest` (`auth_schemas.py`, POST
+`/auth/login` body), `ContainmentRequest` (`containment_schemas.py`,
+POST `/containment/trigger` body). `graph_schemas.py` has no
+request-body models (response-only) — nothing to fix. `AlertFilter`
+intentionally excluded — used as a query-param grouping, not bound as
+a request body.
+
+Commit: `70b9782`.
+
 ---
 
 ## Deferred / documented as limitations (not gaps)
@@ -208,8 +245,6 @@ Limitations and Future Work" writeup rather than left as invisible gaps:
 
 ---
 
-## Still-open loose threads (not yet started)
+## Still-open loose threads
 
-- Audit other Pydantic request schemas (`schemas/*.py`) for the same
-  missing `extra="forbid"` gap that caused the `cloud_provider` filter
-  bug — only `ScanRequest` has been checked/fixed so far.
+*(none — schema audit completed 2026-08-09, see above)*
