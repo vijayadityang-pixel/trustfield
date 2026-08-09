@@ -23,17 +23,48 @@ behind at least two separate bugs hit this project:
 Needs a proper refactor to a single shared client with defined lifecycle,
 not a patch.
 
-### 2. `is_aws_managed` ML feature missing
-**Status:** open
-AWS managed service roles (`AWSServiceRole*`) are structurally
-indistinguishable from user-created roles in the current feature set,
-causing false positives in the anomaly detector. Needs a boolean feature
-flag derived from role naming/path convention, threaded into the
-Isolation Forest training data.
+---
+
+## Resolved this session (2026-08-09)
+
+### `is_aws_managed` ML feature
+**Status:** resolved
+**Verified:** live scan + Neo4j query — all 3 real AWS-managed roles
+(`AWSServiceRoleForResourceExplorer`, `AWSServiceRoleForSupport`,
+`AWSServiceRoleForTrustedAdvisor`) correctly flagged
+`is_aws_managed: true`; all test/admin roles (`trustfield-admin-role`,
+`trustfield-cross-account-role`, `trustfield-intermediate-role`,
+`trustfield-containment-role`) correctly `false`
+Added `is_aws_managed` to `feature_extractor.py` (index 25, appended
+rather than inserted, to avoid shifting `PROVIDER_MAP`/`NODE_TYPE_MAP`
+indices) and to `graph_builder.py`'s `_ingest_aws` via a new
+`_is_aws_managed_role` helper (checks `Path` for the
+`/aws-service-role/` prefix, with a `RoleName` prefix fallback —
+`AWSServiceRoleFor*` / `AWSReservedSSO_*` — in case `Path` isn't
+populated). Retrained model, 26 features confirmed in training
+response.
+
+**Finding (documented for the Week 8 limitations writeup, not a
+further-fix item):** `is_aws_managed` became the single largest
+`feature_contribution` (0.299) for all 3 managed roles, and
+`anomaly_score` dropped from the Week 5 baseline of ~0.89–0.95 to 0.82
+— directionally correct, but did not clear the anomaly threshold.
+Root cause: IsolationForest flags points that are rare in feature
+space, not points matching a specific "safe" pattern. With only 3 of
+1041 nodes carrying `is_aws_managed=true`, the flag's own rarity
+becomes a new isolation signal, partially offsetting its intended
+exculpatory effect. This is a genuine structural limit of unsupervised
+anomaly detection on a domain-derived exculpatory feature — a
+supervised label or a post-hoc override rule (force
+`is_anomaly = False` when `is_aws_managed` is true) would fully
+suppress it, but was deliberately not implemented this session to
+avoid scope creep this late in Week 8.
+
+Commit: `4a93310`.
 
 ---
 
-## Resolved this session (2026-08-06 to 2026-08-08)
+## Resolved (2026-08-06 to 2026-08-08)
 
 ### `job_id` / `id` field naming drift
 **Status:** resolved
@@ -118,6 +149,7 @@ time. Fixed by adding `model_config = ConfigDict(extra="forbid")` to
 silently scanning everything.
 
 Commit: `bd7e292`.
+
 ### `role_chaining` alerts had empty `path_edges`
 **Status:** resolved
 **Verified:** live scan, alerts 141/142/143 — `raw_evidence.path_edges`
@@ -138,7 +170,6 @@ code changes needed — `_record_to_path()` already read the field
 generically.
 
 Commit: `338f6d2`.
-
 
 ---
 
@@ -167,7 +198,14 @@ Limitations and Future Work" writeup rather than left as invisible gaps:
   clobbers demo state.
 - `clear_provider_data` wipes real demo data on every scan, including
   test runs.
-  
+- `is_aws_managed` feature moves anomaly scores in the correct
+  direction (0.89–0.95 → 0.82 for real AWS-managed roles) but does not
+  clear the anomaly threshold, because IsolationForest reads the
+  flag's own rarity (3/1041 nodes) as an isolation signal rather than
+  as exculpatory context. A supervised label or post-hoc override rule
+  would fully resolve this; deliberately not implemented. See resolved
+  entry above for full detail.
+
 ---
 
 ## Still-open loose threads (not yet started)
