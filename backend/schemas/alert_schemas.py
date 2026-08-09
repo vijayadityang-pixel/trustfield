@@ -58,6 +58,8 @@ class AlertResponse(BaseModel):
 class AlertUpdate(BaseModel):
     """Fields that an analyst can update on an existing alert."""
 
+    model_config = ConfigDict(extra="forbid")
+
     status: Optional[AlertStatus] = None
     analyst_notes: Optional[str] = None
     assigned_to: Optional[int] = None

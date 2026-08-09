@@ -3,12 +3,14 @@ TrustField - Auth Schemas
 Pydantic models for login requests and token responses.
 """
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr
 
 from db.models import UserRole
 
 
 class LoginRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     email: EmailStr
     password: str
 

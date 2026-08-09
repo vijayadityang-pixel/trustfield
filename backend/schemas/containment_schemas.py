@@ -15,6 +15,8 @@ from db.models import ContainmentStatus
 class ContainmentRequest(BaseModel):
     """Body for POST /containment/trigger."""
 
+    model_config = ConfigDict(extra="forbid")
+
     action_type: str            # REVOKE_CREDENTIALS | DISABLE_ACCOUNT | ISOLATE_RESOURCE | etc.
     cloud_provider: str         # aws | azure | gcp | k8s
     target_resource: str        # ARN, object ID, IP address, etc.
