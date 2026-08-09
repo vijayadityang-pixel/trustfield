@@ -12,7 +12,7 @@ from db.database import get_db
 from db.models import User
 from auth.dependencies import get_current_user
 from graph.graph_builder import TrustGraphBuilder
-from graph.neo4j_client import Neo4jClient
+from graph.neo4j_singleton import neo4j_client
 from detection.path_finder import PrivilegeEscalationPathFinder
 from detection.risk_scorer import RiskScorer
 from schemas.graph_schemas import (
@@ -27,7 +27,7 @@ from schemas.graph_schemas import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/graph", tags=["Trust Graph"])
 
-neo4j_client = Neo4jClient()
+
 graph_builder = TrustGraphBuilder(neo4j_client)
 path_finder = PrivilegeEscalationPathFinder(neo4j_client)
 risk_scorer = RiskScorer()

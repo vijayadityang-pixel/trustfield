@@ -22,7 +22,7 @@ from containment.gcp_response import GCPContainmentEngine
 from containment.playbooks import PlaybookEngine
 from containment.notifier import AlertNotifier
 from config import settings
-from graph.neo4j_client import Neo4jClient
+from graph.neo4j_singleton import neo4j_client
 from schemas.containment_schemas import (
     ContainmentRequest,
     ContainmentResponse,
@@ -46,7 +46,7 @@ k8s_engine = K8sContainmentEngine(
 )
 playbook_engine = PlaybookEngine()
 notifier = AlertNotifier()
-neo4j_client = Neo4jClient()
+
 
 
 async def _execute_containment(

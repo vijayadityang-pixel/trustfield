@@ -21,7 +21,7 @@ from collectors.azure_collector import AzureCollector
 from collectors.gcp_collector import GCPCollector
 from collectors.k8s_collector import K8sCollector
 from graph.graph_builder import TrustGraphBuilder
-from graph.neo4j_client import Neo4jClient
+from graph.neo4j_singleton import neo4j_client
 from schemas.scan_schemas import (
     ScanRequest,
     ScanJobResponse,
@@ -33,7 +33,7 @@ from config import settings
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/scan", tags=["Scans"])
 
-neo4j_client = Neo4jClient()
+
 graph_builder = TrustGraphBuilder(neo4j_client)
 path_finder = PrivilegeEscalationPathFinder(neo4j_client)
 alert_generator = AlertGenerator()

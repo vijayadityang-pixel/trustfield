@@ -16,7 +16,7 @@ from fastapi.exceptions import RequestValidationError
 
 from config import settings
 from db.database import init_db
-from graph.neo4j_client import Neo4jClient
+from graph.neo4j_singleton import neo4j_client
 from api.routes_alerts import router as alerts_router
 from api.routes_containment import router as containment_router
 from api.routes_graph import router as graph_router
@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 # ─── Lifespan ─────────────────────────────────────────────────────────────────
 
-neo4j_client = Neo4jClient()
+
 
 
 @asynccontextmanager

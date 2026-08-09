@@ -10,14 +10,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from auth.dependencies import get_current_user
 from db.models import User
-from graph.neo4j_client import Neo4jClient
+from graph.neo4j_singleton import neo4j_client
 from ml.feature_extractor import FeatureExtractor
 from ml.isolation_forest import IsolationForestDetector
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/ml", tags=["ML"])
 
-neo4j_client = Neo4jClient()
+
 extractor = FeatureExtractor()
 detector = IsolationForestDetector()
 
