@@ -54,6 +54,9 @@ FEATURE_NAMES = [
     "type_k8s_cluster_role",
     "type_k8s_user",
     "type_k8s_group",
+    # AWS-managed role flag (appended, not inserted, to avoid shifting
+    # PROVIDER_MAP/NODE_TYPE_MAP indices — see field-index-drift history)
+    "is_aws_managed",
 ]
 
 PROVIDER_MAP = {"aws": 8, "azure": 9, "gcp": 10, "k8s": 11}
@@ -71,8 +74,9 @@ NODE_TYPE_MAP = {
     "k8s_cluster_role": 22,
     "k8s_user": 23,
     "k8s_group": 24,
+    
 }
-
+IS_AWS_MANAGED_IDX = 25
 
 class FeatureExtractor:
     """
@@ -100,6 +104,7 @@ class FeatureExtractor:
         features[1] = float(node.get("is_active", True))
         features[2] = float(node.get("has_wildcard_policy", False))
         features[3] = float(node.get("is_cross_account", False))
+        features[IS_AWS_MANAGED_IDX] = float(node.get("is_aws_managed", False))
 
         features[4] = self._normalize(node.get("inbound_edge_count", 0), 100)
         features[5] = self._normalize(node.get("outbound_edge_count", 0), 100)

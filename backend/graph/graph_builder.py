@@ -62,6 +62,7 @@ class TrustGraphBuilder:
                 "account_id": data.account_id,
                 "privilege_level": self._aws_role_privilege(role),
                 "has_wildcard_policy": self._has_wildcard_policy(role),
+                "is_aws_managed": self._is_aws_managed_role(role),
             }
             props["risk_score"] = risk_scorer.score_node(props)
             await self.neo4j.upsert_node(node_id, ["Identity", "AWSRole"], props)
@@ -82,93 +83,6 @@ class TrustGraphBuilder:
                     edges_created += 1
 
         return {"nodes": nodes_created, "edges": edges_created}
-
-    
-    # ─── Azure ────────────────────────────────────────────────────────────────
-
-    async def _ingest_azure(self, data: Any) -> Dict:
-        """Ingest Azure IAM data into the trust graph."""
-        nodes_created = 0
-        edges_created = 0
-
-        # Role definitions first, so we can look up privilege_level while
-        # scoring users/service principals below. Unlike GCP, Azure's
-        # collector already computes privilege_level per role definition
-        # (via _role_definition_privilege), so no heuristic needed here.
-        role_privilege_map: Dict[str, int] = {
-            rd.get("id"): rd.get("privilege_level", 1)
-            for rd in data.role_definitions
-            if rd.get("id")
-        }
-
-        # Derive each principal's privilege_level from the highest-privilege
-        # role it actually holds, so CAN_ASSUME targets carry real privilege
-        # for the privilege_escalation / role_chaining detectors.
-        principal_max_privilege: Dict[str, int] = {}
-        for t in data.trust_relationships:
-            if t.get("relationship") != "HAS_ROLE":
-                continue
-            source = t.get("source", "")
-            target = t.get("target", "")
-            role_priv = role_privilege_map.get(target, 1)
-            principal_max_privilege[source] = max(principal_max_privilege.get(source, 1), role_priv)
-
-        # Users — id is raw AAD object id, matching principal_id used in edges
-        for user in data.users:
-            node_id = user.get("id") or f"azure:user:{user.get('userPrincipalName')}"
-            props = {
-                "id": node_id,
-                "name": user.get("displayName", ""),
-                "upn": user.get("userPrincipalName", ""),
-                "provider": "azure",
-                "node_type": "azure_user",
-                "subscription_id": data.subscription_id,
-                "tenant_id": data.tenant_id,
-                "is_active": user.get("accountEnabled", True),
-                "privilege_level": principal_max_privilege.get(node_id, 1),
-            }
-            props["risk_score"] = risk_scorer.score_node(props)
-            await self.neo4j.upsert_node(node_id, ["Identity", "AzureUser"], props)
-            nodes_created += 1
-
-        # Service principals — same raw-id rule
-        for sp in data.service_principals:
-            node_id = sp.get("id") or f"azure:sp:{sp.get('appId', 'unknown')}"
-            props = {
-                "id": node_id,
-                "name": sp.get("displayName", ""),
-                "app_id": sp.get("appId", ""),
-                "provider": "azure",
-                "node_type": "azure_service_principal",
-                "subscription_id": data.subscription_id,
-                "tenant_id": data.tenant_id,
-                "is_active": sp.get("accountEnabled", True),
-                "privilege_level": principal_max_privilege.get(node_id, 1),
-            }
-            props["risk_score"] = risk_scorer.score_node(props)
-            await self.neo4j.upsert_node(node_id, ["Identity", "AzureServicePrincipal"], props)
-            nodes_created += 1
-
-        # Role definitions — MUST be their own Identity nodes so HAS_ROLE
-        # targets are traversable by the generic privilege_escalation query.
-        # Reuses privilege_level already computed by the collector.
-        for role_def in data.role_definitions:
-            node_id = role_def.get("id")
-            if not node_id:
-                continue
-            props = {
-                "id": node_id,
-                "name": role_def.get("name", ""),
-                "provider": "azure",
-                "node_type": "azure_role_definition",
-                "subscription_id": data.subscription_id,
-                "role_type": role_def.get("role_type", ""),
-                "privilege_level": role_def.get("privilege_level", 1),
-                "grants_self_escalation": role_def.get("grants_self_escalation", False),
-            }
-            props["risk_score"] = risk_scorer.score_node(props)
-            await self.neo4j.upsert_node(node_id, ["Identity", "AzureRoleDefinition"], props)
-            nodes_created += 1
 
     # ─── Azure ────────────────────────────────────────────────────────────────
 
@@ -859,6 +773,28 @@ class TrustGraphBuilder:
         if any("Admin" in p or "FullAccess" in p for p in policies):
             return 4
         return 3
+
+    def _is_aws_managed_role(self, role: Dict) -> bool:
+        """
+        True for AWS service-linked/reserved roles — provisioned and managed
+        by AWS itself, not account admins. These are the dominant false-
+        positive source for anomaly detection: they exist in every account,
+        follow non-human naming, and often carry elevated privilege_level by
+        design (e.g. AWSServiceRoleForOrganizations).
+
+        Path is the authoritative signal for service-linked roles. RoleName
+        prefix is checked as a fallback in case Path isn't populated on
+        `role` dicts by the time they reach this method — TODO verify actual
+        field presence against live data.roles output before relying on this
+        in production scoring.
+        """
+        path = (role.get("Path") or "").lower()
+        name = role.get("RoleName") or ""
+        if path.startswith("/aws-service-role/"):
+            return True
+        if name.startswith("AWSServiceRoleFor") or name.startswith("AWSReservedSSO_"):
+            return True
+        return False
 
     def _has_wildcard_policy(self, entity: Dict) -> bool:
         for policy in entity.get("InlinePolicies", []):
