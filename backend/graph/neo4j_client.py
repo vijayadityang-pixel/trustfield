@@ -276,6 +276,18 @@ class Neo4jClient:
         "high_risk_count": records[0]["high_risk_count"],
         }
     
+    async def get_connected_providers(self) -> List[str]:
+        """Return the distinct cloud providers with at least one ingested
+        Identity node, so the dashboard can show how many/which clouds are
+        actually connected rather than a hardcoded count."""
+        result = await self.run_query("""
+        MATCH (n:Identity)
+        WHERE n.provider IS NOT NULL
+        RETURN DISTINCT n.provider AS provider
+        ORDER BY provider
+        """)
+        return [r["provider"] for r in result]
+
     async def get_all_nodes_and_edges(self, cloud_provider: Optional[str] = None) -> Dict[str, List[Dict]]:
         """
         Return the full graph as raw node/edge dicts using the real stored

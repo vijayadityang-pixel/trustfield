@@ -68,6 +68,7 @@ class GraphStatsResponse(BaseModel):
     high_risk_nodes: int = 0
     escalation_path_count: int = 0
     cloud_provider: Optional[str] = None
+    providers_connected: List[str] = []
     computed_at: Optional[datetime] = None
 
 

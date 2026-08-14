@@ -675,13 +675,24 @@ class TrustGraphBuilder:
         depth: int = 3,
         min_trust_score: float = 0.0,
     ) -> Dict:
-        """Query Neo4j and return graph data for visualization."""
+        """Query Neo4j and return graph data for visualization.
+
+        Nodes are capped per-provider (not globally) and ordered by
+        risk_score DESC, so a flat global LIMIT can't silently starve one
+        provider's nodes out of the response while another provider fills
+        the whole budget - and the highest-risk nodes for each provider are
+        always the ones that survive the cap.
+        """
         query = """
         MATCH (n:Identity)
         WHERE ($provider IS NULL OR n.provider = $provider)
           AND ($account IS NULL OR n.account_id = $account)
           AND n.risk_score >= $min_score
-        WITH n LIMIT 500
+        WITH n
+        ORDER BY n.risk_score DESC
+        WITH n.provider AS provider, collect(n)[0..$per_provider_limit] AS provider_nodes
+        UNWIND provider_nodes AS n
+        WITH n
         OPTIONAL MATCH (n)-[r]->(m:Identity)
         WHERE ($provider IS NULL OR m.provider = $provider)
         RETURN
@@ -699,6 +710,7 @@ class TrustGraphBuilder:
             "provider": cloud_provider,
             "account": account_id,
             "min_score": min_trust_score,
+            "per_provider_limit": 150,
         })
         if not records:
             return {"nodes": [], "edges": []}
@@ -745,6 +757,7 @@ class TrustGraphBuilder:
         """Compute graph-level statistics for the dashboard."""
         stats = await self.neo4j.get_graph_statistics()
         risk_stats = await self.neo4j.get_risk_statistics(cloud_provider=cloud_provider)
+        providers_connected = await self.neo4j.get_connected_providers()
         return {
         "total_nodes": stats.get("node_count", 0),
         "total_edges": stats.get("edge_count", 0),
@@ -752,6 +765,7 @@ class TrustGraphBuilder:
         "high_risk_nodes": risk_stats["high_risk_count"],
         "escalation_path_count": 0,
         "cloud_provider": cloud_provider,
+        "providers_connected": providers_connected,
     }
 
     # ─── Helpers ──────────────────────────────────────────────────────────────

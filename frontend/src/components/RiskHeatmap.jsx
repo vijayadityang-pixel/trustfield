@@ -1,17 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Flame } from 'lucide-react'
 import { fetchGraph } from '../services/api'
+import { riskPercent, riskColor } from '../utils/risk'
+import { nodeCategory, PROVIDERS } from '../utils/nodeTypes'
 
-const PROVIDERS = ['aws', 'azure', 'gcp', 'kubernetes']
 const TYPES = ['Identity', 'Role', 'Policy', 'Resource', 'ServiceAccount']
-
-function riskColor(avg) {
-  if (avg >= 80) return 'var(--risk-critical)'
-  if (avg >= 55) return 'var(--risk-high)'
-  if (avg >= 30) return 'var(--risk-medium)'
-  if (avg > 0) return 'var(--risk-low)'
-  return 'var(--border)'
-}
 
 export default function RiskHeatmap({ onCellSelect }) {
   const [nodes, setNodes] = useState([])
@@ -34,9 +27,9 @@ export default function RiskHeatmap({ onCellSelect }) {
       })
     })
     nodes.forEach((n) => {
-      const key = `${n.provider}|${n.type}`
+      const key = `${n.cloud_provider}|${nodeCategory(n.node_type)}`
       if (cells[key]) {
-        cells[key].sum += n.risk_score ?? 0
+        cells[key].sum += riskPercent(n.risk_score)
         cells[key].count += 1
       }
     })
@@ -82,7 +75,7 @@ export default function RiskHeatmap({ onCellSelect }) {
                   style={{
                     border: '1px solid var(--border)',
                     borderRadius: 8,
-                    background: cell.count ? riskColor(avg) : 'var(--bg-elevated)',
+                    background: cell.count ? riskColor(avg / 100) : 'var(--bg-elevated)',
                     opacity: cell.count ? 0.25 + 0.75 * (avg / 100) : 0.5,
                     height: 52,
                     cursor: cell.count ? 'pointer' : 'default',

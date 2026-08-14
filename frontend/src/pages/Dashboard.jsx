@@ -3,6 +3,8 @@ import { Network, ShieldAlert, Activity, Cloud, Flame, X } from 'lucide-react'
 import TrustGraph from '../components/TrustGraph'
 import RiskHeatmap from '../components/RiskHeatmap'
 import { fetchGraphStats, fetchAlerts } from '../services/api'
+import { riskPercent } from '../utils/risk'
+import { nodeCategory } from '../utils/nodeTypes'
 
 export default function Dashboard() {
   const [stats, setStats] = useState(null)
@@ -83,14 +85,14 @@ export default function Dashboard() {
               </button>
             </div>
             <div style={{ fontSize: 11, color: 'var(--text-faint)', textTransform: 'uppercase', marginBottom: 4 }}>
-              {selectedNode.type} · {selectedNode.provider}
+              {nodeCategory(selectedNode.node_type)} · {selectedNode.cloud_provider}
             </div>
             <div className="mono" style={{ fontSize: 12.5, marginBottom: 10, wordBreak: 'break-all' }}>
-              {selectedNode.label}
+              {selectedNode.name}
             </div>
             <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Risk score</div>
             <div style={{ fontSize: 22, fontFamily: 'var(--font-display)', fontWeight: 600, marginTop: 2 }}>
-              {selectedNode.risk_score ?? '—'}
+              {selectedNode.risk_score != null ? riskPercent(selectedNode.risk_score) : '—'}
             </div>
           </div>
         )}
