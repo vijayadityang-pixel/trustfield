@@ -26,3 +26,4 @@ backend/*credentials*.json
 
 backend/ml/models/
 backups/ 
+login_payload.json
