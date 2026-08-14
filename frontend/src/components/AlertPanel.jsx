@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { Bell, ChevronRight, RotateCcw } from 'lucide-react'
 import { fetchAlerts, updateAlertStatus } from '../services/api'
+import { riskPercent } from '../utils/risk'
 
 const SEVERITIES = ['critical', 'high', 'medium', 'low']
 const STATUSES = ['open', 'in_progress', 'resolved', 'dismissed']
@@ -132,13 +133,13 @@ export default function AlertPanel({ onSelectAlert, selectedAlertId }) {
                     {alert.severity}
                   </span>
                   <span className="badge badge-neutral">{alert.status}</span>
-                  <span className="mono" style={{ color: 'var(--text-faint)' }}>{alert.pattern_id}</span>
+                  <span className="mono" style={{ color: 'var(--text-faint)' }}>{alert.alert_type}</span>
                 </div>
                 <div style={{ fontSize: 13.5, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {alert.title}
                 </div>
                 <div style={{ fontSize: 11.5, color: 'var(--text-faint)', marginTop: 2 }}>
-                  {alert.mitre_technique} · {relativeTime(alert.detected_at)} · risk {alert.risk_score}
+                  {alert.raw_evidence?.mitre_technique} · {relativeTime(alert.created_at)} · risk {riskPercent(alert.risk_score)}
                 </div>
               </div>
               {alert.status === 'open' && (

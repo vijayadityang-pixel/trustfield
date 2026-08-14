@@ -2,20 +2,39 @@
   --bg-base: #0a0d12;
   --bg-surface: #11151c;
   --bg-surface-raised: #161b24;
+  --bg-elevated: #161b24;
+  --bg-hover: #1b212c;
+
+  --border: #2a3340;
   --border-subtle: #2a3340;
   --border-strong: #3a4555;
+  --border-bright: #3a4555;
 
   --text-primary: #e6e9ef;
   --text-secondary: #9aa5b4;
   --text-muted: #5b6679;
+  --text-faint: #5b6679;
 
   --accent-teal: #4fd1c5;
+  --accent-trust: #4fd1c5;
+  --accent-trust-dim: rgba(79, 209, 197, 0.28);
   --accent-amber: #f5a623;
   --accent-red: #f2495c;
 
+  --risk-low: #4fd1c5;
+  --risk-medium: #f5a623;
+  --risk-high: #f2836a;
+  --risk-critical: #f2495c;
+
   --sidebar-width: 248px;
+  --radius-md: 10px;
+  --radius-sm: 6px;
+
+  --shadow-elevated: 0 8px 24px rgba(0, 0, 0, 0.35);
 
   --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-display: 'Space Grotesk', var(--font-sans);
+  --font-mono: 'JetBrains Mono', 'SFMono-Regular', Consolas, monospace;
 }
 
 * {
@@ -39,6 +58,10 @@ body {
 a {
   color: inherit;
   text-decoration: none;
+}
+
+.mono {
+  font-family: var(--font-mono);
 }
 
 /* ---------- App shell ---------- */
@@ -77,6 +100,7 @@ a {
 }
 
 .sidebar-brand-text {
+  font-family: var(--font-display);
   font-size: 15px;
   font-weight: 600;
   letter-spacing: 0.01em;
@@ -101,6 +125,12 @@ a {
   font-weight: 500;
   color: var(--text-secondary);
   transition: background 0.15s ease, color 0.15s ease;
+  cursor: pointer;
+  border: none;
+  background: none;
+  width: 100%;
+  text-align: left;
+  font-family: var(--font-sans);
 }
 
 .sidebar-link:hover {
@@ -125,6 +155,20 @@ a {
   color: var(--text-muted);
 }
 
+/* ---------- Sidebar logout button ---------- */
+
+.sidebar-logout {
+  margin-top: 8px;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 12px;
+  border-radius: 8px;
+}
+
+.sidebar-logout:hover {
+  background: rgba(242, 73, 92, 0.1);
+  color: var(--accent-red);
+}
+
 /* ---------- Main content ---------- */
 
 .main-content {
@@ -132,6 +176,283 @@ a {
   min-width: 0;
   overflow-y: auto;
   padding: 32px;
+}
+
+/* ---------- Page header ---------- */
+
+.page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 24px;
+  gap: 16px;
+}
+
+.page-title {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 600;
+  margin: 0 0 4px;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+
+.page-subtitle {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* ---------- Cards ---------- */
+
+.card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 18px;
+  margin-bottom: 16px;
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0;
+  color: var(--text-primary);
+}
+
+/* ---------- Stat grid ---------- */
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.stat-tile {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 16px;
+}
+
+.stat-tile-label {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-bottom: 8px;
+}
+
+.stat-tile-value {
+  font-family: var(--font-display);
+  font-size: 26px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.stat-tile-value.trust {
+  color: var(--accent-teal);
+}
+
+.stat-tile-value.critical {
+  color: var(--accent-red);
+}
+
+/* ---------- Buttons ---------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface-raised);
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-weight: 500;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+}
+
+.btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--accent-teal);
+  border-color: var(--accent-teal);
+  color: var(--bg-base);
+  font-weight: 600;
+}
+
+.btn-primary:hover {
+  opacity: 0.9;
+  background: var(--accent-teal);
+}
+
+.btn-danger {
+  background: var(--accent-red);
+  border-color: var(--accent-red);
+  color: var(--bg-base);
+  font-weight: 600;
+}
+
+.btn-danger:hover {
+  opacity: 0.9;
+  background: var(--accent-red);
+}
+
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  padding: 6px 8px;
+}
+
+.btn-ghost:hover {
+  background: var(--bg-surface-raised);
+  border-color: transparent;
+}
+
+/* ---------- Select ---------- */
+
+.select {
+  background: var(--bg-surface-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 7px 10px;
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-family: var(--font-sans);
+  cursor: pointer;
+}
+
+.select:focus {
+  outline: none;
+  border-color: var(--accent-teal);
+}
+
+/* ---------- Badges ---------- */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  background: var(--bg-surface-raised);
+  color: var(--text-secondary);
+}
+
+.badge-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+.badge-critical {
+  background: rgba(242, 73, 92, 0.14);
+  color: var(--risk-critical);
+}
+
+.badge-high {
+  background: rgba(242, 131, 106, 0.14);
+  color: var(--risk-high);
+}
+
+.badge-medium {
+  background: rgba(245, 166, 35, 0.14);
+  color: var(--risk-medium);
+}
+
+.badge-low {
+  background: rgba(79, 209, 197, 0.14);
+  color: var(--risk-low);
+}
+
+.badge-neutral {
+  background: var(--bg-surface-raised);
+  color: var(--text-muted);
+}
+
+/* ---------- Empty / loading states ---------- */
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 6px;
+  padding: 40px 20px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+.empty-state-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.skeleton {
+  border-radius: var(--radius-md);
+  background: linear-gradient(
+    100deg,
+    var(--bg-surface-raised) 30%,
+    var(--bg-hover) 50%,
+    var(--bg-surface-raised) 70%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+.spin {
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* ---------- Focus visibility ---------- */
@@ -150,25 +471,12 @@ button:focus-visible,
     transition: none !important;
     animation: none !important;
   }
-}
-
-/* ---------- Sidebar logout button ---------- */
-
-.sidebar-logout {
-  width: 100%;
-  background: none;
-  border: none;
-  cursor: pointer;
-  font-family: var(--font-sans);
-  margin-top: 8px;
-  border-top: 1px solid var(--border-subtle);
-  padding-top: 12px;
-  border-radius: 8px;
-}
-
-.sidebar-logout:hover {
-  background: rgba(242, 73, 92, 0.1);
-  color: var(--accent-red);
+  .skeleton {
+    animation: none !important;
+  }
+  .spin {
+    animation: none !important;
+  }
 }
 
 /* ---------- Login screen ---------- */
@@ -193,6 +501,7 @@ button:focus-visible,
 
 .login-card h1 {
   margin: 0 0 4px;
+  font-family: var(--font-display);
   font-size: 20px;
   font-weight: 600;
   color: var(--text-primary);
