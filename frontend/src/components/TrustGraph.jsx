@@ -8,15 +8,11 @@ import ReactFlow, {
   MarkerType,
 } from 'reactflow'
 import 'reactflow/dist/style.css'
+import dagre from 'dagre'
 import { ShieldAlert, KeyRound, Boxes, Users, Cpu } from 'lucide-react'
 import { fetchGraph } from '../services/api'
-
-const RISK_COLOR = (score) => {
-  if (score >= 80) return 'var(--risk-critical)'
-  if (score >= 55) return 'var(--risk-high)'
-  if (score >= 30) return 'var(--risk-medium)'
-  return 'var(--risk-low)'
-}
+import { riskPercent, riskColor } from '../utils/risk'
+import { nodeCategory } from '../utils/nodeTypes'
 
 const TYPE_ICON = {
   Identity: Users,
@@ -26,62 +22,132 @@ const TYPE_ICON = {
   ServiceAccount: Cpu,
 }
 
+// Fixed accent per type category, independent of risk - lets you tell "what
+// kind of node is this" apart from "how risky is it" at a glance.
+const TYPE_ACCENT = {
+  Identity: '#4fd1c5',
+  Role: '#8b8ff5',
+  ServiceAccount: '#f5a623',
+  Policy: '#f2836a',
+  Resource: '#5b6679',
+}
+
 function TrustNode({ data, selected }) {
-  const Icon = TYPE_ICON[data.type] || Boxes
-  const color = RISK_COLOR(data.risk_score ?? 0)
+  const category = nodeCategory(data.node_type)
+  const Icon = TYPE_ICON[category] || Boxes
+  const accent = TYPE_ACCENT[category] || TYPE_ACCENT.Resource
+  const risk = riskColor(data.risk_score)
+  const pct = riskPercent(data.risk_score)
   return (
     <div
       style={{
         background: 'var(--bg-elevated)',
-        border: `1.5px solid ${selected ? 'var(--accent-trust)' : color}`,
+        border: `1.5px solid ${selected ? 'var(--accent-trust)' : accent}`,
         borderRadius: 10,
         padding: '8px 12px',
-        minWidth: 150,
+        minWidth: 160,
         boxShadow: selected ? '0 0 0 3px var(--accent-trust-dim)' : 'none',
         cursor: 'pointer',
       }}
     >
-      <Handle type="target" position={Position.Top} style={{ background: color, width: 7, height: 7 }} />
+      <Handle type="target" position={Position.Left} style={{ background: accent, width: 7, height: 7 }} />
       <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-        <Icon size={13} color={color} />
+        <Icon size={13} color={accent} />
         <span style={{ fontSize: 11, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-          {data.type}
+          {category}
         </span>
       </div>
       <div className="mono" style={{ marginTop: 4, color: 'var(--text-primary)', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {data.label}
+        {data.name}
       </div>
       <div style={{ marginTop: 5, height: 3, borderRadius: 2, background: 'var(--border)', overflow: 'hidden' }}>
-        <div style={{ width: `${data.risk_score ?? 0}%`, height: '100%', background: color }} />
+        <div style={{ width: `${pct}%`, height: '100%', background: risk }} />
       </div>
-      <Handle type="source" position={Position.Bottom} style={{ background: color, width: 7, height: 7 }} />
+      <Handle type="source" position={Position.Right} style={{ background: accent, width: 7, height: 7 }} />
     </div>
   )
 }
 
 const nodeTypes = { trust: TrustNode }
 
-function radialLayout(nodes) {
-  const groups = {}
-  nodes.forEach((n) => {
-    groups[n.type] = groups[n.type] || []
-    groups[n.type].push(n)
+const NODE_WIDTH = 190
+const NODE_HEIGHT = 66
+
+function dagreLayout(nodes, edges) {
+  const connectedIds = new Set()
+  edges.forEach((e) => {
+    connectedIds.add(e.source_id)
+    connectedIds.add(e.target_id)
   })
-  const types = Object.keys(groups)
-  const positioned = {}
-  const ringGap = 220
-  types.forEach((type, ringIndex) => {
-    const ringNodes = groups[type]
-    const radius = 140 + ringIndex * ringGap
-    ringNodes.forEach((n, i) => {
-      const angle = (2 * Math.PI * i) / Math.max(ringNodes.length, 1)
-      positioned[n.id] = {
-        x: radius * Math.cos(angle) + radius + ringIndex * 40,
-        y: radius * Math.sin(angle) + radius,
-      }
-    })
+  const connectedNodes = nodes.filter((n) => connectedIds.has(n.node_id))
+  const isolatedNodes = nodes.filter((n) => !connectedIds.has(n.node_id))
+
+  const g = new dagre.graphlib.Graph()
+  g.setDefaultEdgeLabel(() => ({}))
+  g.setGraph({ rankdir: 'LR', nodesep: 40, ranksep: 140 })
+
+  connectedNodes.forEach((n) => {
+    g.setNode(n.node_id, { width: NODE_WIDTH, height: NODE_HEIGHT })
   })
-  return positioned
+  edges.forEach((e) => {
+    if (g.hasNode(e.source_id) && g.hasNode(e.target_id)) {
+      g.setEdge(e.source_id, e.target_id)
+    }
+  })
+  dagre.layout(g)
+
+  const positions = {}
+  let maxY = 0
+  connectedNodes.forEach((n) => {
+    const pos = g.node(n.node_id)
+    positions[n.node_id] = pos ? { x: pos.x - NODE_WIDTH / 2, y: pos.y - NODE_HEIGHT / 2 } : { x: 0, y: 0 }
+    if (pos) maxY = Math.max(maxY, pos.y)
+  })
+
+  // Nodes with no edges to anything else in the current view (the common
+  // case - most identities/roles only link to a handful of others) get no
+  // rank from dagre and would otherwise all collapse onto a single column.
+  // Pack them into a roughly square grid instead, below the connected
+  // layout, so the graph stays browsable at any node count.
+  const gridCols = Math.max(1, Math.ceil(Math.sqrt(isolatedNodes.length)))
+  const gridStartY = connectedNodes.length ? maxY + NODE_HEIGHT + 80 : 0
+  isolatedNodes.forEach((n, i) => {
+    const col = i % gridCols
+    const row = Math.floor(i / gridCols)
+    positions[n.node_id] = {
+      x: col * (NODE_WIDTH + 40),
+      y: gridStartY + row * (NODE_HEIGHT + 30),
+    }
+  })
+
+  return positions
+}
+
+// Golden-angle spiral (phyllotaxis / sunflower spacing): plotting points at
+// radius ~ sqrt(index) and angle = index * goldenAngle gives an even,
+// non-overlapping spiral regardless of node count. Sorting by risk before
+// assigning index means the highest-risk nodes always land nearest center -
+// the density of the core is a real signal, not decoration.
+const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5))
+const GRAVITY_SPACING = 46
+
+function gravityLayout(nodes) {
+  if (!nodes.length) return {}
+  const sorted = [...nodes].sort((a, b) => {
+    const diff = (b.risk_score ?? 0) - (a.risk_score ?? 0)
+    return diff !== 0 ? diff : String(a.node_id).localeCompare(String(b.node_id))
+  })
+
+  const positions = {}
+  sorted.forEach((n, i) => {
+    const radius = GRAVITY_SPACING * Math.sqrt(i + 0.5)
+    const angle = i * GOLDEN_ANGLE
+    positions[n.node_id] = {
+      x: radius * Math.cos(angle) - NODE_WIDTH / 2,
+      y: radius * Math.sin(angle) - NODE_HEIGHT / 2,
+    }
+  })
+  return positions
 }
 
 const EDGE_COLOR = {
@@ -96,6 +162,8 @@ export default function TrustGraph({ filters = {}, highlightPath = [], onNodeSel
   const [rawNodes, setRawNodes] = useState([])
   const [rawEdges, setRawEdges] = useState([])
   const [status, setStatus] = useState('loading')
+  const [rfInstance, setRfInstance] = useState(null)
+  const [layoutMode, setLayoutMode] = useState('grid')
 
   const load = useCallback(() => {
     setStatus('loading')
@@ -112,14 +180,27 @@ export default function TrustGraph({ filters = {}, highlightPath = [], onNodeSel
     load()
   }, [load])
 
-  const positions = useMemo(() => radialLayout(rawNodes), [rawNodes])
+  // `fitView` on <ReactFlow> only fits once, at first mount - but graph data
+  // arrives asynchronously after that, so the initial fit locks onto an
+  // empty/near-empty canvas and never re-fits once real nodes land. Refit
+  // manually whenever the node set actually changes.
+  useEffect(() => {
+    if (rfInstance && rawNodes.length) {
+      rfInstance.fitView({ padding: 0.15, duration: 300 })
+    }
+  }, [rfInstance, rawNodes, layoutMode])
+
+  const positions = useMemo(
+    () => (layoutMode === 'gravity' ? gravityLayout(rawNodes) : dagreLayout(rawNodes, rawEdges)),
+    [rawNodes, rawEdges, layoutMode]
+  )
 
   const flowNodes = useMemo(
     () =>
       rawNodes.map((n) => ({
-        id: n.id,
+        id: n.node_id,
         type: 'trust',
-        position: positions[n.id] || { x: 0, y: 0 },
+        position: positions[n.node_id] || { x: 0, y: 0 },
         data: n,
       })),
     [rawNodes, positions]
@@ -127,22 +208,25 @@ export default function TrustGraph({ filters = {}, highlightPath = [], onNodeSel
 
   const flowEdges = useMemo(
     () =>
-      rawEdges.map((e) => {
+      rawEdges.map((e, idx) => {
         const isHighlighted =
           highlightPath.length > 1 &&
-          highlightPath.some((id, idx) => id === e.source && highlightPath[idx + 1] === e.target)
+          highlightPath.some((id, i) => id === e.source_id && highlightPath[i + 1] === e.target_id)
         return {
-          id: e.id,
-          source: e.source,
-          target: e.target,
-          label: e.type,
+          id: `${e.source_id}-${e.relationship_type}-${e.target_id}-${idx}`,
+          source: e.source_id,
+          target: e.target_id,
+          label: e.relationship_type,
           animated: isHighlighted,
           style: {
-            stroke: isHighlighted ? 'var(--risk-critical)' : EDGE_COLOR[e.type] || 'var(--border-bright)',
+            stroke: isHighlighted ? 'var(--risk-critical)' : EDGE_COLOR[e.relationship_type] || 'var(--border-bright)',
             strokeWidth: isHighlighted ? 2.5 : 1.2,
           },
           labelStyle: { fill: 'var(--text-faint)', fontSize: 10 },
-          markerEnd: { type: MarkerType.ArrowClosed, color: isHighlighted ? 'var(--risk-critical)' : EDGE_COLOR[e.type] || 'var(--border-bright)' },
+          markerEnd: {
+            type: MarkerType.ArrowClosed,
+            color: isHighlighted ? 'var(--risk-critical)' : EDGE_COLOR[e.relationship_type] || 'var(--border-bright)',
+          },
         }
       }),
     [rawEdges, highlightPath]
@@ -174,26 +258,45 @@ export default function TrustGraph({ filters = {}, highlightPath = [], onNodeSel
   }
 
   return (
-    <div style={{ height: 480, width: '100%', borderRadius: 'var(--radius-md)', overflow: 'hidden', border: '1px solid var(--border)' }}>
-      <ReactFlow
-        nodes={flowNodes}
-        edges={flowEdges}
-        nodeTypes={nodeTypes}
-        onNodeClick={(_, node) => onNodeSelect && onNodeSelect(node.data)}
-        fitView
-        proOptions={{ hideAttribution: true }}
-        defaultEdgeOptions={{ type: 'default' }}
-      >
-        <Background color="var(--border)" gap={22} size={1} />
-        <Controls showInteractive={false} />
-        <MiniMap
-          pannable
-          zoomable
-          style={{ background: 'var(--bg-elevated)' }}
-          maskColor="rgba(10,13,18,0.7)"
-          nodeColor={(n) => RISK_COLOR(n.data?.risk_score ?? 0)}
-        />
-      </ReactFlow>
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, marginBottom: 8 }}>
+        <button
+          className="btn btn-ghost"
+          style={layoutMode === 'grid' ? { color: 'var(--accent-trust)', background: 'var(--bg-hover)' } : undefined}
+          onClick={() => setLayoutMode('grid')}
+        >
+          Grid
+        </button>
+        <button
+          className="btn btn-ghost"
+          style={layoutMode === 'gravity' ? { color: 'var(--accent-trust)', background: 'var(--bg-hover)' } : undefined}
+          onClick={() => setLayoutMode('gravity')}
+        >
+          Gravity well
+        </button>
+      </div>
+      <div style={{ height: 480, width: '100%', borderRadius: 'var(--radius-md)', overflow: 'hidden', border: '1px solid var(--border)' }}>
+        <ReactFlow
+          nodes={flowNodes}
+          edges={flowEdges}
+          nodeTypes={nodeTypes}
+          onNodeClick={(_, node) => onNodeSelect && onNodeSelect(node.data)}
+          onInit={setRfInstance}
+          fitView
+          proOptions={{ hideAttribution: true }}
+          defaultEdgeOptions={{ type: 'default' }}
+        >
+          <Background color="var(--border)" gap={22} size={1} />
+          <Controls showInteractive={false} />
+          <MiniMap
+            pannable
+            zoomable
+            style={{ background: 'var(--bg-elevated)' }}
+            maskColor="rgba(10,13,18,0.7)"
+            nodeColor={(n) => riskColor(n.data?.risk_score)}
+          />
+        </ReactFlow>
+      </div>
     </div>
   )
 }
