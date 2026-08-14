@@ -10,13 +10,216 @@ Status values: `open`, `in progress`, `resolved`, `deferred (documented limitati
 
 ## Open
 
-*(none currently — five-singleton refactor and is_aws_managed both
-resolved this session; remaining work is the schema audit loose
-thread below and the Week 8 writeup/demo tasks)*
+### `ContainmentModal.jsx` test suite — mock missing `fetchContainmentAction`/`fetchAlert`
+**Status:** open (deferred, found during UI polish session, not fixed —
+unrelated to that session's scope)
+**Verified:** `npx vitest run` — 3 failures in `Containmentmodal.test.jsx`,
+confirmed pre-existing via `git stash` (same 3 failures with all of this
+session's UI/graph changes reverted, so not caused by this work)
+The test file's `vi.mock('../../services/api')` block doesn't stub
+`fetchAlert` or `fetchContainmentAction`, both of which
+`ContainmentModal.jsx` calls — needs the mock updated to match whatever
+the component actually imports. Not yet root-caused beyond that.
+
+### `build_subgraph()` frontend/backend field mismatch (dormant, unused)
+**Status:** open (documented, not fixed — no urgency)
+`build_subgraph()` (backs `GET /graph/subgraph/{node_id}`) has the same
+kind of field mismatch `build_graph()` had before this session's fix —
+its Cypher returns `id`/`provider`/`source`/`target`/`type` instead of
+`node_id`/`cloud_provider`/`source_id`/`target_id`/`relationship_type`,
+which `NodeDetail`/`EdgeDetail` require. Currently harmless because
+`fetchSubgraph()` is exported from `api.js` but never called anywhere in
+the frontend — but it will 500 with a Pydantic validation error the
+moment something calls it. Fix when that endpoint gets wired up.
 
 ---
 
-## Resolved this session (2026-08-09)
+## Resolved this session (2026-08-14)
+
+### Frontend design-system layer was entirely missing
+**Status:** resolved
+**Verified:** `npm run build` clean (vite 5.4.21, 2121 modules, no
+errors); `npx vitest run` — same pass/fail counts as before the CSS
+change (3 pre-existing `ContainmentModal` failures, see Open above;
+nothing newly broken); live-verified in browser against a running
+backend/Neo4j
+Root cause: `index.css` only ever defined the app shell (sidebar,
+login screen) — roughly 15 CSS custom properties referenced across
+`TrustGraph.jsx`, `AlertPanel.jsx`, `RiskHeatmap.jsx`, `PathDetail.jsx`,
+`ContainmentModal.jsx`, and all four `pages/*.jsx` files
+(`--bg-elevated`, `--bg-hover`, `--border`, `--border-bright`,
+`--accent-trust(-dim)`, `--risk-critical/high/medium/low`,
+`--text-faint`, `--radius-md`, `--shadow-elevated`, `--font-display`,
+`--font-mono`) were never defined, and ~15 component classes
+(`.card`, `.card-header/-title`, `.btn` + variants, `.badge` +
+severity variants, `.select`, `.skeleton`, `.empty-state`,
+`.stat-grid/-tile`, `.mono`, `.page-header/-title/-subtitle`) had zero
+rules anywhere in the codebase. Every content surface outside the
+sidebar/login screen had been rendering with browser-default styling
+since whenever those components were written — this, not a "needs
+polish" issue, was the actual reason the app looked unfinished.
+Fixed by extending `index.css` with the full token set and the full
+component stylesheet. Added Space Grotesk (display / stat numbers) and
+JetBrains Mono (`.mono` — IDs, ARNs) via Google Fonts link in
+`index.html`, alongside existing Inter.
+Files: `index.html`, `src/index.css`, `src/components/AlertPanel.jsx`
+(see field-name fix below, same commit).
+
+### `AlertPanel.jsx` field-name mismatch (cosmetic bug, previously deferred)
+**Status:** resolved
+**Verified:** confirmed against `backend/schemas/alert_schemas.py` and
+`backend/detection/alert_generator.py` (`raw_evidence` dict
+construction) before editing — not guessed
+`AlertPanel.jsx` read `alert.pattern_id`, `alert.detected_at`, and
+`alert.mitre_technique` as top-level fields. Real `AlertResponse`
+fields are `alert_type` and `created_at`; `mitre_technique` is nested
+inside `raw_evidence`, not top-level. All three previously rendered
+`undefined`. Fixed to `alert.alert_type`, `alert.created_at`,
+`alert.raw_evidence?.mitre_technique`, and risk score now goes through
+the shared `riskPercent()` util (see below) instead of printing the
+raw 0-1 float.
+File: `src/components/AlertPanel.jsx`.
+
+### Frontend↔backend graph contract mismatch (graph view + heatmap rendered empty)
+**Status:** resolved
+**Verified:** `vite build` clean; `npx vitest run` — same 3 pre-existing
+`ContainmentModal` failures, nothing new broken; `py_compile` clean on
+all touched backend files; live-verified — Dashboard now renders real
+nodes/edges in the trust graph, heatmap cells populate with real
+percentages, "Providers connected" shows a real count (4)
+Root cause, three separate mismatches stacked on top of each other:
+1. `GraphResponse`'s Cypher output (`build_graph()` in
+   `graph_builder.py`) correctly matches the backend's own
+   `NodeDetail`/`EdgeDetail` schema (`node_id`, `node_type`, `name`,
+   `cloud_provider`; edges `source_id`, `target_id`,
+   `relationship_type`) — the backend was internally consistent, but
+   `TrustGraph.jsx` and `RiskHeatmap.jsx` were written against a
+   simpler, never-matching shape (`id`, `type`, `label`, `provider`).
+2. Real ingested `node_type` values are provider-specific
+   (`aws_role`, `azure_service_principal`, `k8s_cluster_role`, etc.),
+   not the generic `Identity/Role/Policy/Resource/ServiceAccount`
+   categories the graph/heatmap group by. **`Policy` and `Resource`
+   are not populated by any collector currently** — only identities,
+   roles, and service-account-like principals are ingested today, so
+   those two categories will legitimately stay empty until
+   policy/resource nodes are modeled (not a bug, a scope gap, see
+   Known Limitations).
+3. `RiskHeatmap.jsx`'s provider list used `'kubernetes'`; the actual
+   stored value is `'k8s'` (see `graph_builder.py` — `"provider":
+   "k8s"` throughout the k8s ingestion pass), so the Kubernetes row
+   could never match any node.
+An earlier attempt at this fix (normalizing field names inside
+`fetchGraph()` in `api.js`, aliasing the real fields to the shape
+components expected) was written, then superseded and reverted in
+favor of fixing the shape mismatch at its actual source: components
+now read the real backend fields directly (`node_id`, `node_type`,
+`name`, `cloud_provider`), and a single shared
+`src/utils/nodeTypes.js` (`NODE_TYPE_CATEGORY` map + `PROVIDERS` list)
+is the one place the ~14 real `node_type` strings get bucketed into
+the 5 display categories, rather than duplicating that map in `api.js`
+and each component separately. `api.js`'s `fetchGraph()` is back to a
+plain passthrough.
+Files: `src/utils/nodeTypes.js` (new),
+`src/components/TrustGraph.jsx`, `src/components/RiskHeatmap.jsx`,
+`src/pages/Dashboard.jsx`.
+
+### `GraphStatsResponse` missing `providers_connected`; `build_graph()` had an unordered flat `LIMIT 500`
+**Status:** resolved
+**Verified:** live — Azure `Role` heatmap cell shows 149/150 nodes,
+confirming the new per-provider cap is actually engaging (not just
+coincidentally under the old flat limit); "Providers connected" tile
+shows a real `4`
+Two related backend gaps found while fixing the contract mismatch
+above:
+1. `compute_stats()` never computed which providers actually have
+   ingested data — the frontend's "Providers connected" stat had
+   nothing real to bind to. Added
+   `neo4j_client.get_connected_providers()` (`MATCH (n:Identity) ...
+   RETURN DISTINCT n.provider`), wired through `compute_stats()`, and
+   added `providers_connected: List[str] = []` to
+   `GraphStatsResponse`.
+2. `build_graph()`'s Cypher capped the whole result set at a flat
+   `LIMIT 500` with no `ORDER BY` — on a multi-provider graph this
+   meant one provider with a lot of nodes could silently starve
+   another provider's nodes out of the response entirely, and there
+   was no guarantee the *highest-risk* nodes were the ones that
+   survived the cap. Rewrote to cap 150 nodes per provider, ordered by
+   `risk_score DESC`, so every connected provider always gets
+   representation and the nodes that make the cut are the ones that
+   matter most for a risk-focused view.
+Files: `backend/graph/neo4j_client.py`, `backend/graph/graph_builder.py`,
+`backend/schemas/graph_schemas.py`.
+
+### Risk score displayed as raw 0.0-1.0 float instead of a percent (graph, heatmap, alerts, node detail)
+**Status:** resolved
+**Verified:** live — node detail panel shows "Risk score: 18", not
+"0.18"; heatmap cells show real percentages instead of near-zero
+rounding artifacts
+`risk_score` is stored as a 0.0-1.0 float everywhere in the backend
+(`backend/detection/risk_scorer.py`), but `TrustGraph.jsx` and
+`RiskHeatmap.jsx` treated it as already being 0-100 (progress-bar
+`width: ${risk_score}%`, severity thresholds checked against
+`>=80/55/30`) — every risk bar rendered essentially empty and every
+severity bucket resolved to "low." Centralized the conversion in a new
+`src/utils/risk.js` (`riskPercent()`, `riskBucket()`, `riskColor()`)
+so every display surface converts through one place instead of each
+component reimplementing (and mismatching) the scale independently.
+Thresholds (85/70/55/low) match `alert_generator.py`'s
+`_severity_for_risk` cuts exactly.
+Files: `src/utils/risk.js` (new), `src/components/TrustGraph.jsx`,
+`src/components/RiskHeatmap.jsx`, `src/components/AlertPanel.jsx`,
+`src/pages/Dashboard.jsx`.
+
+### `TrustGraph.jsx` layout: radial layout collapsed to a single point; dagre replacement then collapsed to a single column; `fitView` never refit after async load
+**Status:** resolved
+**Verified:** live — graph renders as a browsable multi-column grid
+(isolated nodes) with dagre-laid-out chains (connected nodes); zoom
+controls and minimap visible; no manual pan/zoom needed to find the
+bulk of the ~1041 nodes on load
+Three layered bugs, found in sequence while live-verifying the graph
+contract fix above:
+1. Before this session, `radialLayout()` positioned nodes keyed by
+   `positions[n.id]` — but `n.id` was always `undefined` (the real
+   field is `node_id`, see contract fix above), so every node looked
+   up the same `positions[undefined]` entry and rendered stacked
+   exactly on top of each other. Fixed as part of the contract fix.
+2. Replacing `radialLayout()` with a `dagre`-based `rankdir: LR`
+   layout fixed the single-point collapse, but introduced a new
+   problem: dagre assigns rank purely from edges, so any node with
+   zero edges to other nodes in view (the common case — most
+   identities/roles/service-accounts don't link to each other
+   directly) defaults to rank 0, and hundreds of them stacked into one
+   very tall column instead of spreading out. Fixed by splitting nodes
+   into connected vs. isolated sets: connected nodes still get a
+   normal dagre `LR` layout; isolated nodes are packed into a roughly
+   square grid below it instead of one column, keeping the graph
+   browsable at any node count.
+3. `fitView` on `<ReactFlow>` is a boolean prop that only fits the
+   viewport once, at first mount — but graph data loads asynchronously
+   after that render, so the initial fit locked onto an empty/near-
+   empty canvas and never re-fit once the real node set arrived,
+   requiring manual pan/zoom to find anything. Fixed by capturing the
+   ReactFlow instance via `onInit` and calling `fitView()` again in a
+   `useEffect` keyed off the node array actually changing.
+Also added `dagre` to `package.json`.
+Files: `src/components/TrustGraph.jsx`, `frontend/package.json`.
+
+### New: "Gravity well" alternate graph layout
+**Status:** shipped (enhancement, not a bug fix)
+A second layout mode, toggled alongside the default grid view. Nodes
+are sorted by `risk_score` descending and placed on a golden-angle
+phyllotaxis spiral (radius grows with sort-rank via `sqrt(index)`,
+angle increments by the golden angle each step) — an even,
+non-overlapping spiral at any node count, where the highest-risk node
+in the whole graph always lands at the center and density falls off
+outward. Real trust edges still draw between wherever nodes land in
+the spiral. `fitView` refit logic (above) re-triggers on layout-mode
+switch as well as on data load.
+File: `src/components/TrustGraph.jsx`.
+
+---
+
+## Resolved earlier (2026-08-09)
 
 ### Five-singleton Neo4j architecture
 **Status:** resolved
