@@ -10,17 +10,6 @@ Status values: `open`, `in progress`, `resolved`, `deferred (documented limitati
 
 ## Open
 
-### `ContainmentModal.jsx` test suite — mock missing `fetchContainmentAction`/`fetchAlert`
-**Status:** open (deferred, found during UI polish session, not fixed —
-unrelated to that session's scope)
-**Verified:** `npx vitest run` — 3 failures in `Containmentmodal.test.jsx`,
-confirmed pre-existing via `git stash` (same 3 failures with all of this
-session's UI/graph changes reverted, so not caused by this work)
-The test file's `vi.mock('../../services/api')` block doesn't stub
-`fetchAlert` or `fetchContainmentAction`, both of which
-`ContainmentModal.jsx` calls — needs the mock updated to match whatever
-the component actually imports. Not yet root-caused beyond that.
-
 ### `build_subgraph()` frontend/backend field mismatch (dormant, unused)
 **Status:** open (documented, not fixed — no urgency)
 `build_subgraph()` (backs `GET /graph/subgraph/{node_id}`) has the same
@@ -34,15 +23,64 @@ moment something calls it. Fix when that endpoint gets wired up.
 
 ---
 
-## Resolved this session (2026-08-14)
+## Resolved this session (2026-08-16)
+
+### `ContainmentModal.jsx` test suite — mock missing `fetchAlert`/`fetchContainmentAction`/`resolveK8sBinding`/`resolveGcpBinding`
+**Status:** resolved
+**Verified:** `npx vitest run` — 15/15 passing, both test files (was
+12/15 with 3 pre-existing `Containmentmodal.test.jsx` failures)
+Root cause: the test file's `vi.mock('../../services/api')` block only
+stubbed `triggerContainment`. The component had since grown to also
+call `fetchAlert` (to resolve the full alert regardless of what the
+caller passed in), `resolveK8sBinding`/`resolveGcpBinding` (to resolve
+a concrete binding target for k8s/gcp before showing the action
+catalog), and `fetchContainmentAction` (to poll a triggered action
+until it reaches `completed`/`failed`, since `/containment/trigger`
+only queues a background job and returns immediately). None of these
+were stubbed, so any test exercising a k8s or gcp alert, or the
+execute-action flow, threw as soon as the component called an
+undefined mock function.
+Fix went beyond adding stubs — two tests' premises were stale and
+needed rewriting to match current component behavior:
+- The k8s test previously asserted the catalog rendered synchronously;
+  the component now gates it behind an async resolution step, so the
+  test now mocks `fetchAlert`/`resolveK8sBinding` and uses `waitFor`.
+- The gcp test previously asserted "no actions available for
+  unrecognized provider" — no longer true, since gcp now has a real
+  action catalog (`Remove IAM binding`). Replaced with a test of the
+  actual current edge case: the blocked-message state shown when
+  `source_node_id`/`target_node_id` are missing and resolution can't
+  proceed.
+- The "shows done state" test's `triggerContainment` mock now resolves
+  `{ action_id }` instead of `{}`, and `fetchContainmentAction` is
+  mocked to return `{ status: 'completed' }` immediately so the poll
+  resolves without hitting the real 15s timeout.
+File: `frontend/src/components/__tests__/Containmentmodal.test.jsx`.
+Commit: `15cf5f6`.
+
+### AWS Console cleanup — `trustfield-rotate-test` IAM user + NACL rule on `acl-0629ecd6db413837c`
+**Status:** resolved (found already resolved — logging for the record)
+**Verified:** live in AWS Console — IAM Users page shows only 2 users
+(`trustfield-collector`, `trustfield-victim`), no `trustfield-rotate-test`;
+`acl-0629ecd6db413837c` inbound rules show only the two default rules
+(100/allow-all, */deny-all) with no leftover custom rule
+Both items were previously flagged as pending manual cleanup because
+`trustfield-collector`'s IAM role lacks delete permissions for IAM
+users and NACL rules. On checking the console directly this session,
+both were already gone — either cleaned up manually in an earlier
+session and never logged here, or the rule/user in question never
+actually persisted. No action was needed; closing the item as
+resolved rather than leaving it open against a false premise.
+
+---
+
+## Resolved earlier (2026-08-14)
 
 ### Frontend design-system layer was entirely missing
 **Status:** resolved
 **Verified:** `npm run build` clean (vite 5.4.21, 2121 modules, no
 errors); `npx vitest run` — same pass/fail counts as before the CSS
-change (3 pre-existing `ContainmentModal` failures, see Open above;
-nothing newly broken); live-verified in browser against a running
-backend/Neo4j
+change; live-verified in browser against a running backend/Neo4j
 Root cause: `index.css` only ever defined the app shell (sidebar,
 login screen) — roughly 15 CSS custom properties referenced across
 `TrustGraph.jsx`, `AlertPanel.jsx`, `RiskHeatmap.jsx`, `PathDetail.jsx`,
@@ -431,9 +469,6 @@ Limitations and Future Work" writeup rather than left as invisible gaps:
   `_ingest_aws`, `_ingest_azure`, `_ingest_gcp` — latent bug when
   condition fields are read back as dicts elsewhere; already hit and
   fixed once in the GCP resolver with `ast.literal_eval`.
-- `AlertPanel.jsx` reads `alert.pattern_id`, `alert.detected_at`,
-  `alert.mitre_technique` — none exist in `AlertResponse`. Cosmetic,
-  deferred.
 - `POST /ml/train` overwrites the demo model pkl — running tests
   clobbers demo state.
 - `clear_provider_data` wipes real demo data on every scan, including
@@ -450,4 +485,5 @@ Limitations and Future Work" writeup rather than left as invisible gaps:
 
 ## Still-open loose threads
 
-*(none — schema audit completed 2026-08-09, see above)*
+*(none — schema audit completed 2026-08-09, ContainmentModal test fix
+and AWS Console cleanup verification completed 2026-08-16)*
