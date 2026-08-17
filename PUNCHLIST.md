@@ -23,7 +23,28 @@ moment something calls it. Fix when that endpoint gets wired up.
 
 ---
 
-## Resolved this session (2026-08-16)
+## Resolved this session (2026-08-17)
+
+### `trustfield_demo_script.md` — demo script for College Review-1 panel
+**Status:** resolved (drafted fresh — no prior skeleton existed on disk;
+earlier session had deferred this to "after Week 8" and it was never
+saved)
+Full script written covering: pre-demo golden-snapshot restore
+checklist (`neo4j_golden.dump` + `trustfield_golden.dump`), opening
+framing (cross-cloud graph correlation as the core value prop vs.
+single-cloud native tools), UI walkthrough (Dashboard → gravity-well
+graph view → heatmap → alert detail → containment modal, narrated
+against alert 126 as a simple example), centerpiece live walkthrough
+of the Azure role-chaining chain (alerts 141/142/143,
+`trustfield-victim-azure → trustfield-chain-identity →
+Owner/Contributor/UAA`, MITRE T1548.005), and a close on the
+`is_aws_managed` IsolationForest limitation as the honest research
+insight. Includes anticipated panel Q&A prep notes and a flexible
+timing cheat sheet (built for a longer/flexible slot, with guidance on
+what to cut if time is short).
+File: `trustfield_demo_script.md` (repo root).
+
+## Resolved earlier (2026-08-16)
 
 ### `ContainmentModal.jsx` test suite — mock missing `fetchAlert`/`fetchContainmentAction`/`resolveK8sBinding`/`resolveGcpBinding`
 **Status:** resolved
@@ -486,4 +507,5 @@ Limitations and Future Work" writeup rather than left as invisible gaps:
 ## Still-open loose threads
 
 *(none — schema audit completed 2026-08-09, ContainmentModal test fix
-and AWS Console cleanup verification completed 2026-08-16)*
+and AWS Console cleanup verification completed 2026-08-16, demo script
+completed 2026-08-17)*
